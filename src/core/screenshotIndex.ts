@@ -243,9 +243,14 @@ export class ScreenshotIndex {
   errors: string[] = [];
   generation = 0;
   scannedAt: Date | null = null;
+  private fingerprint = '';
   private readonly byResolution = new Map<string, ScreenshotEntry[]>();
 
-  async rebuild(paths: string[], options: ScreenshotScanOptions): Promise<void> {
+  /**
+   * 重新扫描。返回 true 表示截图集合（路径/修改时间/大小/分辨率）发生变化，
+   * 需要重新匹配；返回 false 时调用方应复用已有匹配缓存。
+   */
+  async rebuild(paths: string[], options: ScreenshotScanOptions): Promise<boolean> {
     const errors: string[] = [];
     const collected = new Set<string>();
 
@@ -300,10 +305,16 @@ export class ScreenshotIndex {
     }
 
     entries.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
+    const fingerprint = entries
+      .map((entry) => `${entry.path}|${entry.mtimeMs}|${entry.size}|${entry.width}x${entry.height}`)
+      .join('\n');
+    const changed = fingerprint !== this.fingerprint;
+
     this.entries = entries;
     this.errors = errors;
     this.scannedAt = new Date();
-    this.generation++;
+    this.fingerprint = fingerprint;
+    if (changed) this.generation++;
     this.byResolution.clear();
     for (const entry of entries) {
       const key = `${entry.width}x${entry.height}`;
@@ -311,6 +322,11 @@ export class ScreenshotIndex {
       if (list) list.push(entry);
       else this.byResolution.set(key, [entry]);
     }
+    return changed;
+  }
+
+  get currentFingerprint(): string {
+    return this.fingerprint;
   }
 
   candidates(width: number, height: number): ScreenshotEntry[] {
@@ -329,6 +345,7 @@ export class ScreenshotIndex {
     this.entries = [];
     this.byResolution.clear();
     this.errors = [];
+    this.fingerprint = '';
     this.generation++;
   }
 }

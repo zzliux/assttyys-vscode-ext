@@ -12,6 +12,7 @@ import { extractPatterns, isDetectFile, isRelevantFile } from '../core/extract';
 import { DetectPatternIndex } from '../core/detectIndex';
 import { ScreenshotIndex } from '../core/screenshotIndex';
 import { MatcherService, type MatchCancellation } from '../core/matcherService';
+import { MatchDiskCache } from '../core/matchDiskCache';
 import { configKey, readConfig, type ExtensionConfig } from './config';
 import { PreviewPanel } from './previewPanel';
 import { InlayHintsProvider } from './inlayHints';
@@ -67,6 +68,7 @@ export class ExtensionController implements vscode.Disposable {
   private config: ExtensionConfig;
   private screenshots = new ScreenshotIndex();
   private matcher: MatcherService;
+  private readonly diskCache: MatchDiskCache;
   private readonly detectIndex = new DetectPatternIndex();
   private readonly states = new Map<string, DocumentState>();
   private readonly loadedDetectFiles = new Map<string, number>();
@@ -85,7 +87,10 @@ export class ExtensionController implements vscode.Disposable {
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.config = readConfig();
-    this.matcher = new MatcherService(this.screenshots);
+    this.diskCache = new MatchDiskCache(
+      path.join(context.globalStorageUri.fsPath, 'match-cache-v1.json'),
+    );
+    this.matcher = new MatcherService(this.screenshots, this.diskCache);
     this.matcher.setErrorHandler((message) => this.log(message));
     this.output = vscode.window.createOutputChannel('Assttyys 截图匹配');
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -141,7 +146,7 @@ export class ExtensionController implements vscode.Disposable {
           this.detectReloadTimer.cancel();
           void this.reloadDetectDocument(document);
         }
-        this.invalidateDocument(document.uri.toString());
+        this.invalidateDocument(document.uri.toString(), document.version);
       }),
       vscode.workspace.onDidOpenTextDocument((document) => {
         if (!isDetectFile(document.fileName)) return;
@@ -256,9 +261,15 @@ export class ExtensionController implements vscode.Disposable {
     );
     if (targets.length === 0) return undefined;
 
+    // 比色/内联定义的成本主要是“把同分辨率截图解码一遍”；一次把当前文件里
+    // 所有比色 desc 都匹配掉，后续滚动/切换可见区域就不再重复解码。
+    // 找色需要逐像素搜索，仍然只匹配当前可见区域。
+    const hasFindPattern = state.patterns.some((pattern) => pattern.kind === 'find');
+    const matchTargets = hasFindPattern ? targets : state.targets;
+
     const pendingPatterns = Array.from(
       new Map(
-        targets
+        matchTargets
           .filter((target) => !state.matchesByPatternId.has(target.pattern.id))
           .map((target) => [target.pattern.id, target.pattern]),
       ).values(),
@@ -271,17 +282,17 @@ export class ExtensionController implements vscode.Disposable {
           this.matcherOptions(),
           token as MatchCancellation,
         );
-        if (token.isCancellationRequested) return undefined;
         for (const [patternId, matches] of matched) {
           state.matchesByPatternId.set(patternId, matches);
         }
+        if (token.isCancellationRequested) return undefined;
       } finally {
         this.endMatching();
       }
     }
     if (token.isCancellationRequested) return undefined;
 
-    for (const target of targets) {
+    for (const target of matchTargets) {
       const matches = state.matchesByPatternId.get(target.pattern.id) ?? [];
       if (matches.length === 0) continue;
       state.matchSets.set(
@@ -530,20 +541,22 @@ export class ExtensionController implements vscode.Disposable {
     );
     const cwd = workspaceFolders[0] ?? process.cwd();
     try {
-      await this.screenshots.rebuild(this.config.screenshotPaths, {
+      const changed = await this.screenshots.rebuild(this.config.screenshotPaths, {
         includeSubfolders: this.config.includeSubfolders,
         extensions: this.config.extensions,
         workspaceFolders,
         cwd,
       });
-      this.matcher.invalidate();
-      this.invalidateAll();
-      this.refreshMarkerProviders();
+      if (changed) {
+        this.matcher.invalidate();
+        this.invalidateAll();
+        this.refreshMarkerProviders();
+      }
       this.updateStatus();
       this.log(
         `[${reason}] 扫描到 ${this.screenshots.entries.length} 张截图${
           this.screenshots.resolutionSummary ? `（${this.screenshots.resolutionSummary}）` : ''
-        }`,
+        }${changed ? '，截图集合有变化，已重新匹配' : '，截图集合未变化，复用已有匹配缓存'}`,
       );
       for (const error of this.screenshots.errors) this.log(`  - ${error}`);
     } catch (error) {
@@ -695,7 +708,11 @@ export class ExtensionController implements vscode.Disposable {
     return undefined;
   }
 
-  private invalidateDocument(uri: string): void {
+  private invalidateDocument(uri: string, version?: number): void {
+    const state = this.states.get(uri);
+    if (!state) return;
+    // 保存但没有实际修改时 version 不变，不需要丢掉匹配缓存。
+    if (version !== undefined && state.version === version) return;
     this.states.delete(uri);
     this.refreshMarkerProviders();
   }
@@ -760,6 +777,7 @@ export class ExtensionController implements vscode.Disposable {
     this.invalidateTimer.cancel();
     this.detectReloadTimer.cancel();
     this.screenshotRefreshTimer.cancel();
+    void this.matcher.flushCache();
     for (const watcher of this.screenshotWatchers) watcher.dispose();
     for (const disposable of this.disposables) disposable.dispose();
     this.provider.dispose();

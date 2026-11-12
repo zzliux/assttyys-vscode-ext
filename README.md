@@ -31,14 +31,14 @@
 2. 在最新 tag 的 Release 附件中下载 VSIX，文件名类似：
 
    ```text
-   assttyys-vscode-ext-0.1.0.vsix
+   assttyys-vscode-ext-0.1.1.vsix
    ```
 
 3. 在 VS Code 中打开扩展面板，点右上角 `...` → “从 VSIX 安装...”，选择刚下载的 `.vsix`。
    或者命令行（把路径换成实际下载位置）：
 
    ```powershell
-   code --install-extension .\assttyys-vscode-ext-0.1.0.vsix --force
+   code --install-extension .\assttyys-vscode-ext-0.1.1.vsix --force
    ```
 
 4. 重新加载 VS Code 窗口。
@@ -200,16 +200,24 @@ git config --global http.proxy http://127.0.0.1:7890
 git config --global https.proxy http://127.0.0.1:7890
 ```
 
-## 性能
+## 性能与缓存
 
-- 同一分辨率的截图在一次匹配中只解码一次，再用这张图同时测试当前可见的所有 `desc`，避免“每个 desc 都把全部截图重新解码一遍”。
+- 同一分辨率的截图在一次匹配中只解码一次，再用这张图同时测试当前文件里的所有比色 `desc`；后续滚动不会重复解码。
 - VSIX 内置了 Windows x64 的 [sharp](https://sharp.pixelplumbing.com/) 原生解码器。
 - 实测数据（三个真实截图目录，共 1159 张，其中 986 张 1280×720）：
-  - `multiDetectColors.ts` 的 68 个比色定义：命中 28 个，耗时约 **3.5 秒**；
-  - `001_准备.ts` 的内联数组 + 字符串引用：命中 4 个，耗时约 **2.9 秒**；
-  - `multiFindColors.ts` 的“剧情问号”可见区域：命中 3 个，耗时约 **2.1 秒**。
+  - `multiDetectColors.ts` 的 68 个比色定义：命中 28 个，首次约 **3.3 秒**；缓存命中后约 **9 毫秒**；
+  - `001_准备.ts` 的内联数组 + 字符串引用：命中 4 个，首次约 **3.0 秒**；缓存命中后约 **4 毫秒**；
+  - `multiFindColors.ts` 的“剧情问号”可见区域：命中 3 个，首次约 **1.7 秒**。
 - 如果原生 sharp 在当前平台无法加载，会自动退回纯 JS 的 pngjs/jpeg-js；功能不变，但速度会慢一些（同等数据约 30 秒）。
-- 找色默认只扫描最近 200 张同分辨率截图（`assttyys.findColorScanLimit`），比色扫描全部。
+
+### 缓存策略
+
+- **文档状态缓存**：文件内容没变时不重新解析/匹配。
+- **desc 签名缓存**：只比较 `kind`、分辨率、点坐标/颜色/容差、`region`、`similar`。只改注释、排版、描述文字时复用旧匹配结果。
+- **截图指纹缓存**：根据截图路径、修改时间、大小、分辨率生成指纹；截图集合没变就不重新匹配。
+- **磁盘缓存**：匹配结果写入 VS Code 的扩展 `globalStorage`，重启 VS Code 后仍可复用；截图集合或匹配参数变化时自动失效。
+- **比色预匹配**：打开比色/功能文件时一次匹配该文件内所有比色 `desc`，滚动只更新可见区域，不再重复解码。
+- **找色**：仍需逐像素搜索，默认只匹配最近 200 张同分辨率截图（`assttyys.findColorScanLimit`），并按 `desc` 签名缓存结果。
 
 ## 已知限制
 

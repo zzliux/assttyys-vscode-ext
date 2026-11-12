@@ -37,12 +37,21 @@ describe('ScreenshotIndex', () => {
     await fs.writeFile(path.join(testDir, 'not-image.txt'), 'hello');
 
     const index = new ScreenshotIndex();
-    await index.rebuild([testDir], {
+    const firstScan = await index.rebuild([testDir], {
       includeSubfolders: true,
       extensions: ['png', 'jpg', 'jpeg'],
       workspaceFolders: [],
       cwd: testDir,
     });
+    expect(firstScan).toBe(true);
+
+    const unchangedScan = await index.rebuild([testDir], {
+      includeSubfolders: true,
+      extensions: ['png', 'jpg', 'jpeg'],
+      workspaceFolders: [],
+      cwd: testDir,
+    });
+    expect(unchangedScan).toBe(false);
 
     expect(index.entries).toHaveLength(3);
     expect(index.candidates(1280, 720)).toHaveLength(2);
@@ -58,6 +67,16 @@ describe('ScreenshotIndex', () => {
     const decodedJpeg = await decodeImageFile(path.join(testDir, 'nested', 'c.jpg'));
     expect(decodedJpeg.width).toBe(1280);
     expect(decodedJpeg.height).toBe(720);
+
+    await writePng(path.join(testDir, 'd.png'), 1280, 720);
+    const changedScan = await index.rebuild([testDir], {
+      includeSubfolders: true,
+      extensions: ['png', 'jpg', 'jpeg'],
+      workspaceFolders: [],
+      cwd: testDir,
+    });
+    expect(changedScan).toBe(true);
+    expect(index.entries).toHaveLength(4);
   });
 
   it('支持 glob 路径且不重复', async () => {
@@ -68,7 +87,7 @@ describe('ScreenshotIndex', () => {
       workspaceFolders: [],
       cwd: testDir,
     });
-    expect(index.entries).toHaveLength(2);
+    expect(index.entries).toHaveLength(3);
   });
 
   it('目录不存在时记录错误但不抛异常', async () => {

@@ -40,7 +40,8 @@ describe('MatcherService', () => {
       png.data[index + 2] = color.b;
     }
     await fs.mkdir(testDir, { recursive: true });
-    await fs.writeFile(path.join(testDir, 'match.png'), PNG.sync.write(png));
+    const imagePath = path.join(testDir, 'match.png');
+    await fs.writeFile(imagePath, PNG.sync.write(png));
 
     const screenshots = new ScreenshotIndex();
     await screenshots.rebuild([testDir], {
@@ -50,16 +51,31 @@ describe('MatcherService', () => {
       cwd: testDir,
     });
     const service = new MatcherService(screenshots);
-    const matches = await service.matchPattern(pattern!, {
+    const options = {
       colorSimilarity: 93,
       findColorSimilarity: 97,
       findColorOffset: true,
       maxMatchesPerPattern: 10,
-    });
+    };
+    const matches = await service.matchPattern(pattern!, options);
 
     expect(matches).toHaveLength(1);
-    expect(matches[0].path).toBe(path.join(testDir, 'match.png'));
+    expect(matches[0].path).toBe(imagePath);
     expect(matches[0].width).toBe(1280);
     expect(matches[0].height).toBe(720);
+
+    // 同一个 desc 只改 id/version/行号时，应命中签名缓存，不再解码文件。
+    // 删除图片后如果仍返回旧结果，说明缓存生效。
+    await fs.rm(imagePath);
+    const renamedPattern = {
+      ...pattern!,
+      id: 'another-id',
+      version: 99,
+      anchorOffset: 0,
+      label: 'another-label',
+    };
+    const cachedMatches = await service.matchPattern(renamedPattern, options);
+    expect(cachedMatches).toHaveLength(1);
+    expect(cachedMatches[0].path).toBe(imagePath);
   });
 });

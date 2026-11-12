@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type {
   MatchSet,
   MatcherOptions,
@@ -5,6 +6,7 @@ import type {
   ScreenshotMatch,
 } from './model';
 import type { ScreenshotIndex } from './screenshotIndex';
+import type { MatchDiskCache } from './matchDiskCache';
 import { decodeImageFile } from './imageLoader';
 import { matchDetect, matchFind } from './matcher';
 
@@ -33,6 +35,23 @@ function resolutionKey(pattern: PatternDefinition): string {
 }
 
 /**
+ * 只对“会影响匹配结果”的字段做签名。
+ *
+ * 文件版本号、行号、key/label 都不参与，所以只改注释、调整排版、甚至改描述
+ * 文字时，只要 desc 的坐标/颜色/容差没变，就能命中旧缓存。
+ */
+function patternSignature(pattern: PatternDefinition): string {
+  const payload = JSON.stringify({
+    kind: pattern.kind,
+    resolution: pattern.resolution,
+    points: pattern.points,
+    region: pattern.region,
+    similarity: pattern.similarity,
+  });
+  return crypto.createHash('sha1').update(payload).digest('hex');
+}
+
+/**
  * 把定义、截图索引和图片缓存串起来。
  *
  * 大量截图时，按“每张图只解码一次、同时测试多个 desc”的方式匹配，避免
@@ -42,7 +61,10 @@ export class MatcherService {
   private readonly cache = new Map<string, MatchCacheItem>();
   private onError: (message: string) => void = () => {};
 
-  constructor(private readonly screenshots: ScreenshotIndex) {}
+  constructor(
+    private readonly screenshots: ScreenshotIndex,
+    private readonly diskCache?: MatchDiskCache,
+  ) {}
 
   setErrorHandler(handler: (message: string) => void): void {
     this.onError = handler;
@@ -70,10 +92,12 @@ export class MatcherService {
     const result = new Map<string, ScreenshotMatch[]>();
     const signature = optionsKey(options);
     const pendingById = new Map<string, PatternDefinition>();
+    if (token?.isCancellationRequested) return result;
+    await this.diskCache?.ensure(this.screenshots.currentFingerprint, signature);
 
     for (const pattern of patterns) {
       if (pendingById.has(pattern.id)) continue;
-      const cached = this.getCached(pattern, signature);
+      const cached = this.getCached(patternSignature(pattern), signature);
       if (cached) {
         result.set(pattern.id, cached);
       } else {
@@ -91,7 +115,6 @@ export class MatcherService {
     }
 
     for (const group of groups.values()) {
-      if (token?.isCancellationRequested) break;
       const first = group[0];
       let candidates = this.screenshots.candidates(
         first.resolution.width,
@@ -106,7 +129,7 @@ export class MatcherService {
       if (candidates.length === 0) {
         for (const pattern of group) {
           result.set(pattern.id, []);
-          this.setCached(pattern, signature, []);
+          this.setCached(patternSignature(pattern), signature, []);
         }
         continue;
       }
@@ -119,7 +142,9 @@ export class MatcherService {
       const total = candidates.length;
 
       const worker = async (): Promise<void> => {
-        while (!token?.isCancellationRequested) {
+        // 批量匹配一旦开始就做完并写缓存。VS Code 在滚动时会取消旧的 hint
+        // 请求，如果这里中途放弃，下一次滚动又要重新解码全部截图。
+        while (true) {
           if (active.size === 0) break;
           const index = nextIndex++;
           if (index >= candidates.length) break;
@@ -173,41 +198,42 @@ export class MatcherService {
       const concurrency = Math.min(8, candidates.length);
       await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
-      // 被取消时结果是部分的，不写入缓存，等下一次完整匹配。
-      if (token?.isCancellationRequested) break;
-
       for (const pattern of group) {
         const matches = partial.get(pattern.id) ?? [];
         result.set(pattern.id, matches);
-        this.setCached(pattern, signature, matches);
+        this.setCached(patternSignature(pattern), signature, matches);
       }
     }
 
     return result;
   }
 
-  private getCached(pattern: PatternDefinition, signature: string): ScreenshotMatch[] | undefined {
-    const cached = this.cache.get(`${pattern.id}|${pattern.version}`);
+  private getCached(
+    patternKey: string,
+    optionsSignature: string,
+  ): ScreenshotMatch[] | undefined {
+    const cached = this.cache.get(patternKey);
     if (
       cached &&
       cached.generation === this.screenshots.generation &&
-      cached.optionsKey === signature
+      cached.optionsKey === optionsSignature
     ) {
       return cached.matches;
     }
-    return undefined;
+    return this.diskCache?.get(patternKey);
   }
 
   private setCached(
-    pattern: PatternDefinition,
-    signature: string,
+    patternKey: string,
+    optionsSignature: string,
     matches: ScreenshotMatch[],
   ): void {
-    this.cache.set(`${pattern.id}|${pattern.version}`, {
+    this.cache.set(patternKey, {
       generation: this.screenshots.generation,
-      optionsKey: signature,
+      optionsKey: optionsSignature,
       matches,
     });
+    this.diskCache?.set(patternKey, matches);
     if (this.cache.size > 2000) {
       const oldest = this.cache.keys().next().value as string | undefined;
       if (oldest) this.cache.delete(oldest);
@@ -216,6 +242,11 @@ export class MatcherService {
 
   invalidate(): void {
     this.cache.clear();
+    this.diskCache?.reset();
+  }
+
+  async flushCache(): Promise<void> {
+    await this.diskCache?.flush();
   }
 
   makeMatchSet(

@@ -6,7 +6,10 @@ import { spawnSync } from 'node:child_process';
 const ROOT = process.cwd();
 const STAGE = path.resolve(process.argv[2] ?? 'test-output/packaged-extension');
 const SHOULD_PACKAGE = process.argv.includes('--package');
-const VSIX_PATH = path.join(ROOT, 'assttyys-vscode-ext-0.1.0.vsix');
+const PACKAGE_VERSION = JSON.parse(
+  await fsp.readFile(path.join(ROOT, 'package.json'), 'utf8'),
+).version;
+const VSIX_PATH = path.join(ROOT, `assttyys-vscode-ext-${PACKAGE_VERSION}.vsix`);
 
 async function copyFile(relativePath, targetRelative = relativePath) {
   const target = path.join(STAGE, targetRelative);
