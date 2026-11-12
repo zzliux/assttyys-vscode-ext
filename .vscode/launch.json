@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "运行扩展（打开 assttyys_autojs）",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["${workspaceFolder}/.refs/assttyys_autojs"],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "npm: build"
+    },
+    {
+      "name": "运行扩展（手动选择工作区）",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "npm: build"
+    }
+  ]
+}

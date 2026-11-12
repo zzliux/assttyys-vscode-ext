@@ -1,0 +1,15 @@
+.refs/**
+.vscode/**
+.vscode-test/**
+coverage/**
+test-output/**
+test/**
+src/**
+node_modules/**
+esbuild.mjs
+vitest.config.ts
+tsconfig.json
+package-lock.json
+.gitignore
+**/*.ts
+**/*.map

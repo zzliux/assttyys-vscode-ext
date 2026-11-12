@@ -1,0 +1,173 @@
+{
+  "name": "assttyys-vscode-ext",
+  "displayName": "Assttyys 截图匹配",
+  "description": "为 assttyys_autojs 的比色/找色定义匹配本地截图，并在 desc 旁显示可点击的预览图标。",
+  "version": "0.1.0",
+  "publisher": "zzliux",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zzliux/assttyys-vscode-ext.git"
+  },
+  "homepage": "https://github.com/zzliux/assttyys-vscode-ext#readme",
+  "bugs": {
+    "url": "https://github.com/zzliux/assttyys-vscode-ext/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "assttyys",
+    "autojs",
+    "color",
+    "screenshot"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "assttyys.refresh",
+        "title": "Assttyys: 刷新截图与匹配",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "assttyys.openSettings",
+        "title": "Assttyys: 打开设置"
+      },
+      {
+        "command": "assttyys.previewAtCursor",
+        "title": "Assttyys: 预览光标处的匹配截图"
+      },
+      {
+        "command": "assttyys.showOutput",
+        "title": "Assttyys: 显示日志"
+      },
+      {
+        "command": "assttyys.showStats",
+        "title": "Assttyys: 显示解析统计"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "assttyys.previewAtCursor",
+          "when": "resourceLangId == typescript",
+          "group": "navigation@100"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "assttyys.previewAtCursor",
+          "when": "editorLangId == typescript"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Assttyys 截图匹配",
+      "properties": {
+        "assttyys.screenshotPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "截图路径，可配置多个。支持目录、单个图片文件或 glob（如 `D:/shots/**/*.png`）。相对路径按工作区解析；支持 `${workspaceFolder}` 和 `${env:NAME}`。"
+        },
+        "assttyys.includeSubfolders": {
+          "type": "boolean",
+          "default": true,
+          "description": "截图路径为目录时，是否递归查找子目录。"
+        },
+        "assttyys.previewImageExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "png",
+            "jpg",
+            "jpeg"
+          ],
+          "description": "参与匹配的图片扩展名（当前支持 PNG/JPEG）。"
+        },
+        "assttyys.colorSimilarity": {
+          "type": "number",
+          "default": 93,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "多点比色相似度（%），对应脚本里的 colorSimilar。"
+        },
+        "assttyys.findColorSimilarity": {
+          "type": "number",
+          "default": 97,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "多点找色相似度（%），对应脚本里的 multiColorSimilar；定义里写有 similar 时以定义为准。"
+        },
+        "assttyys.findColorOffset": {
+          "type": "boolean",
+          "default": true,
+          "description": "找色时是否使用 3×3 错位匹配。脚本运行时默认开启；关闭后匹配更严格、速度更快。"
+        },
+        "assttyys.maxMatchesPerPattern": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "每个 desc 最多保留多少张匹配截图（按修改时间从新到旧）。"
+        },
+        "assttyys.findColorScanLimit": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 2000,
+          "description": "找色定义只扫描最近的 N 张同分辨率截图；比色定义始终扫描全部。截图很多时调小可显著加快 multiFindColors 的匹配。"
+        },
+        "assttyys.showStringReferences": {
+          "type": "boolean",
+          "default": true,
+          "description": "功能文件里 `desc: '准备界面_未准备'` 这种字符串引用，也在字符串旁显示匹配图标。"
+        },
+        "assttyys.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "打开/保存定义文件或截图变化时自动重新匹配。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "npm run build && node test/integration/runTest.cjs",
+    "package": "npm run typecheck && npm run build && node scripts/stage-extension.mjs test-output/packaged-extension --package",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "fast-glob": "^3.3.3",
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0",
+    "sharp": "0.32.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pngjs": "^6.0.5",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "2.20.0",
+    "esbuild": "^0.25.0",
+    "mocha": "^10.8.2",
+    "typescript": "^5.4.5",
+    "vitest": "^2.1.9"
+  }
+}
