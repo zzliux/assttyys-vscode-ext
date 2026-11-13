@@ -1,52 +1,41 @@
-# v0.3.0 — Ctrl+单击跳转与动态 desc 匹配
+# v0.3.1 — 修复预览图标与跳转点击区域冲突
 
 发布日期：2026-11-13
 
-## 主要变化
+## 修复
 
-### Ctrl+单击跳转
+- 修复 `desc: 'key'` 和 `desc: thisOperator[N].desc` 位置上的 📷 预览图标与 Ctrl+单击跳转链接点击区域重叠的问题。
+- 字符串/动态 desc 的 📷 图标移到该行行尾，彻底避开跳转链接的文本区域。
+- 字符串引用的跳转范围只包含引号内的内容，不再给引号和图标前的空白加下划线。
+- 图标前不再额外加空格。
+- 现在点击 📷 图标只执行截图预览，不会再同时跳到本文件 `operator[N]` 或 `multiDetectColors.ts`。
+- 点击文字区域仍然执行 Ctrl+单击跳转：
+  - `thisOperator[N]` / `.desc` / `.oper[...]` → 本文件对应 `operator[N]` 字段；
+  - `desc: 'key'` → `multiDetectColors.ts` 对应 **key 行**；
+  - `findMultiColor('key')` → `multiFindColors.ts` 对应 **key 行**。
 
-在 `funcList` / `funcList.bak` 的功能文件里支持：
+## 0.3.0 已有功能
 
-- `thisOperator[N]` → 本文件 `operator[N]` 的 `desc` 字段；
-- `thisOperator[N].desc` / `thisOperator[N].oper[...]` → 本文件对应 `operator[N]` 的 `desc` / `oper` 字段；
-- `desc: 'key'` → `multiDetectColors.ts` 的对应 **key 行**；
-- `findMultiColor('key')` / `findMultiColorEx` / `findMultiColorLoop` → `multiFindColors.ts` 的对应 **key 行**。
-
-跳转链接使用 VS Code 原生 DocumentLink，按住 Ctrl 时显示可点击样式，点击后定位到目标行。
-
-### 动态 desc 匹配
-
-`desc: thisOperator[N].desc` 现在也会显示截图匹配图标。
-
-图标复用 `operator[N]` 对应 desc 的缓存匹配结果，不会为这个动态引用单独重新匹配。
-
-### 支持 funcList.bak
-
-`src/common/funcList.bak/**/*.ts` 里的文件也会参与图标和跳转解析。
+- `desc: thisOperator[N].desc` 动态引用显示截图图标，并复用目标 desc 缓存。
+- 支持 `funcList.bak`。
+- 项目级比色预匹配和匹配缓存继续保留。
 
 ## 验证
 
 - 22 个核心单元测试通过；
 - 5 个演示集成测试通过；
 - 5 个真实截图测试通过；
-- 已实际验证跳转落在 `multiDetectColors.ts` / `multiFindColors.ts` 的 key 行。
+- 集成测试额外断言所有预览图标位置都不落在跳转链接范围内。
 
 ## 安装
 
-1. 打开 [Releases 页面](https://github.com/zzliux/assttyys-vscode-ext/releases/tag/0.3.0)。
-2. 下载 `assttyys-vscode-ext-0.3.0.vsix`。
+1. 打开 [Releases 页面](https://github.com/zzliux/assttyys-vscode-ext/releases/tag/0.3.1)。
+2. 下载 `assttyys-vscode-ext-0.3.1.vsix`。
 3. VS Code 扩展面板 → `...` → “从 VSIX 安装...”。
 4. 重新加载窗口。
 
 或命令行：
 
 ```powershell
-code --install-extension .\assttyys-vscode-ext-0.3.0.vsix --force
+code --install-extension .\assttyys-vscode-ext-0.3.1.vsix --force
 ```
-
-## 配置提醒
-
-- `assttyys.screenshotPaths` 推荐直接配置目录，会自动递归子目录。
-- 路径里不要带不可见 Unicode 字符（如 `U+202A`），否则扫描不到截图。
-- 找色默认只扫描最近 200 张同分辨率截图，可用 `assttyys.findColorScanLimit` 调整。

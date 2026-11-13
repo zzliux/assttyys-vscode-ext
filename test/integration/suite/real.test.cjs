@@ -99,6 +99,15 @@ suite('Assttyys 真实截图匹配', () => {
       String(hint.tooltip?.value ?? '').includes('thisOperator[0].desc'),
     );
     assert.ok(dynamicHint, '动态 desc 没有生成图标');
+
+    const links = await api.controller.provideDocumentLinks(document, token);
+    for (const hint of hints) {
+      const overlapping = links.find(
+        (link) =>
+          hint.position.isAfter(link.range.start) && hint.position.isBefore(link.range.end),
+      );
+      assert.ok(!overlapping, '预览图标和跳转链接的点击区域重叠了');
+    }
   });
 
   test('找色文件可见区域可以命中真实截图', async function () {

@@ -15,19 +15,37 @@ describe('extractNavigationLinks', () => {
     expect(sameOperator.some((link) => link.operatorIndex === 2)).toBe(true);
 
     expect(links.some((link) => link.kind === 'detect' && link.key === '探索地图界面')).toBe(false);
-    expect(links.some((link) => link.kind === 'find' && link.key === '组队探索_宝箱')).toBe(true);
+    const findLink = links.find((link) => link.kind === 'find' && link.key === '组队探索_宝箱');
+    expect(findLink).toBeDefined();
+    const text = fs.readFileSync(filePath, 'utf8');
+    expect(findLink!.startOffset).toBeGreaterThan(text.indexOf("'组队探索_宝箱'"));
+    expect(findLink!.endOffset).toBeLessThan(
+      text.indexOf("'组队探索_宝箱'") + "'组队探索_宝箱'".length,
+    );
   });
 
   it('解析 funcList.bak 里的动态 desc 和字符串引用', () => {
     const filePath = path.join(REFS, 'funcList.bak/010_地图进入突破界面.ts');
     const links = extractNavigationLinks(fs.readFileSync(filePath, 'utf8'), filePath);
 
+    const text = fs.readFileSync(filePath, 'utf8');
     const operatorLinks = links.filter(
       (link) => link.kind === 'same-operator' && link.operatorIndex === 0,
     );
-    expect(operatorLinks.some((link) => link.tooltip.includes('.desc'))).toBe(true);
+    const descLink = operatorLinks.find((link) => link.tooltip.includes('.desc'));
+    expect(descLink).toBeDefined();
+    expect(descLink!.endOffset).toBeLessThan(
+      text.indexOf('thisOperator[0].desc') + 'thisOperator[0].desc'.length,
+    );
     expect(operatorLinks.some((link) => link.tooltip.includes('.oper'))).toBe(true);
-    expect(links.some((link) => link.kind === 'detect' && link.key === '探索地图界面')).toBe(true);
+
+    const detectLink = links.find(
+      (link) => link.kind === 'detect' && link.key === '探索地图界面',
+    );
+    expect(detectLink).toBeDefined();
+    expect(detectLink!.endOffset).toBeLessThan(
+      text.indexOf("'探索地图界面'") + "'探索地图界面'".length,
+    );
   });
 
   it('operatorFunc 内联 operator 的 desc 字符串也能跳 multiDetectColors', () => {

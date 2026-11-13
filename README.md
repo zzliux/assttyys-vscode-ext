@@ -38,14 +38,14 @@
 2. 在最新 tag 的 Release 附件中下载 VSIX，文件名类似：
 
    ```text
-   assttyys-vscode-ext-0.3.0.vsix
+   assttyys-vscode-ext-0.3.1.vsix
    ```
 
 3. 在 VS Code 中打开扩展面板，点右上角 `...` → “从 VSIX 安装...”，选择刚下载的 `.vsix`。
    或者命令行（把路径换成实际下载位置）：
 
    ```powershell
-   code --install-extension .\assttyys-vscode-ext-0.3.0.vsix --force
+   code --install-extension .\assttyys-vscode-ext-0.3.1.vsix --force
    ```
 
 4. 重新加载 VS Code 窗口。

@@ -618,8 +618,11 @@ export class ExtensionController implements vscode.Disposable {
           }
           continue;
         }
+        const line = document.positionAt(reference.anchorOffset).line;
         targets.push({
-          anchorOffset: reference.anchorOffset,
+          // 字符串/动态引用同时有 Ctrl+单击跳转链接。把图标放到行尾，
+          // 和 DocumentLink 的文本区域彻底分开，避免一次点击触发两个命令。
+          anchorOffset: document.offsetAt(document.lineAt(line).range.end),
           label: reference.key,
           stateKey: reference.id,
           pattern,
@@ -631,8 +634,10 @@ export class ExtensionController implements vscode.Disposable {
     for (const dynamic of result.dynamicReferences) {
       const pattern = operatorTargets.get(dynamic.targetOperatorIndex);
       if (!pattern) continue;
+      const line = document.positionAt(dynamic.anchorOffset).line;
       targets.push({
-        anchorOffset: dynamic.anchorOffset,
+        // 同上：动态引用处有跳转链接，预览图标放到行尾。
+        anchorOffset: document.offsetAt(document.lineAt(line).range.end),
         label: dynamic.label,
         stateKey: dynamic.id,
         pattern,

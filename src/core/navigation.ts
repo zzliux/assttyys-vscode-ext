@@ -164,10 +164,11 @@ export function extractNavigationLinks(text: string, filePath: string): Navigati
           const overall = topExpression(node);
           const targetField = field === 'item' ? 'desc' : field;
           const targetOffset = fieldTargetOffset(element, targetField);
+          // 末尾留出两个字的空间，避免和该位置后面的预览图标点击区域重叠。
           add({
             kind: 'same-operator',
             startOffset: overall.getStart(),
-            endOffset: overall.getEnd(),
+            endOffset: Math.max(overall.getStart() + 1, overall.getEnd() - 2),
             tooltip: `跳转到本文件 operator[${index}].${targetField}`,
             operatorIndex: index,
             targetOffset,
@@ -183,10 +184,11 @@ export function extractNavigationLinks(text: string, filePath: string): Navigati
         const cls = enclosingClass(node);
         const operatorArray = operatorArrayOf(cls);
         if (isOperatorItem(object, operatorArray)) {
+          // 只让引号里的字符串内容可点击，引号本身不参与下划线。
           add({
             kind: 'detect',
-            startOffset: value.getStart(),
-            endOffset: value.getEnd(),
+            startOffset: value.getStart() + 1,
+            endOffset: Math.max(value.getStart() + 1, value.getEnd() - 1),
             tooltip: `跳转到 multiDetectColors.ts 的 ${value.text} 定义`,
             key: value.text,
           });
@@ -209,8 +211,9 @@ export function extractNavigationLinks(text: string, filePath: string): Navigati
         const arg = node.arguments[0];
         add({
           kind: 'find',
-          startOffset: arg.getStart(),
-          endOffset: arg.getEnd(),
+          // 同 desc 字符串：只让引号里的内容可点击。
+          startOffset: arg.getStart() + 1,
+          endOffset: Math.max(arg.getStart() + 1, arg.getEnd() - 1),
           tooltip: `跳转到 multiFindColors.ts 的 ${arg.text} 定义`,
           key: arg.text,
         });

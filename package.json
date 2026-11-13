@@ -2,7 +2,7 @@
   "name": "assttyys-vscode-ext",
   "displayName": "Assttyys 截图匹配",
   "description": "为 assttyys_autojs 的比色/找色定义匹配本地截图，并在 desc 旁显示可点击的预览图标。",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "zzliux",
   "license": "MIT",
   "repository": {
