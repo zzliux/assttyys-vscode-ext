@@ -123,6 +123,26 @@ suite('Assttyys 真实截图匹配', () => {
     assert.ok(findHint, 'findMultiColor 的字符串没有生成图标');
   });
 
+  test('同一 find key 的多个 desc 分组会合并显示', async function () {
+    this.timeout(120000);
+    const file = path.join(
+      root,
+      'src',
+      'common',
+      'funcList',
+      '014_探索_点击挑战图标.ts',
+    );
+    const document = await vscode.workspace.openTextDocument(file);
+    const range = new vscode.Range(0, 0, document.lineCount - 1, 0);
+    const token = new vscode.CancellationTokenSource().token;
+    const hints = await api.controller.provideHints(document, range, token);
+    const findHint = hints.find((hint) =>
+      String(hint.tooltip?.value ?? '').includes('find:探索_挑战'),
+    );
+    assert.ok(findHint, '探索_挑战 的多 desc 分组没有生成图标');
+    assert.ok(findHint.label[0].value.includes('📷'));
+  });
+
   test('找色文件可见区域可以命中真实截图', async function () {
     this.timeout(120000);
     const file = path.join(root, 'src', 'common', 'multiFindColors.ts');

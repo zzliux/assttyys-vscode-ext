@@ -17,5 +17,9 @@ describe('DetectPatternIndex', () => {
     // 索引按 key 去重后只有 140 个，但后台预匹配必须拿到全部 234 个分组。
     expect(index.size).toBe(140);
     expect(index.getAll()).toHaveLength(234);
+
+    // '探索_挑战' 在 multiFindColors 里有两个 desc 分组，功能调用必须合并两组。
+    const funcFile = path.join(REFS, 'funcList', '014_探索_点击挑战图标.ts');
+    expect(index.resolveAll(funcFile, '探索_挑战')).toHaveLength(2);
   });
 });

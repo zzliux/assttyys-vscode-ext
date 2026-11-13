@@ -24,6 +24,22 @@ interface HintTarget {
   label: string;
   stateKey: string;
   pattern: PatternDefinition;
+  /** find key 可能对应多个 desc 分组，命中时需要合并。 */
+  patterns?: PatternDefinition[];
+}
+
+function targetPatterns(target: HintTarget): PatternDefinition[] {
+  return target.patterns && target.patterns.length > 0 ? target.patterns : [target.pattern];
+}
+
+function combineMatches(groups: ScreenshotMatch[][]): ScreenshotMatch[] {
+  const byPath = new Map<string, ScreenshotMatch>();
+  for (const matches of groups) {
+    for (const match of matches) {
+      if (!byPath.has(match.path)) byPath.set(match.path, match);
+    }
+  }
+  return Array.from(byPath.values());
 }
 
 interface DocumentState {
@@ -97,6 +113,7 @@ export class ExtensionController implements vscode.Disposable {
   private lastProgressUpdate = 0;
   private lastMatchSummary = '';
   private cacheHitTimer: ReturnType<typeof setTimeout> | undefined;
+  private hasScannedScreenshots = false;
   private projectPrecomputePromise: Promise<void> | null = null;
   private projectPrecomputeAgain = false;
   private projectPatternCount = 0;
@@ -413,6 +430,7 @@ export class ExtensionController implements vscode.Disposable {
   }
 
   private scheduleBackgroundFindPrecompute(delay = 1200): void {
+    if (process.env.ASSTTYYS_DISABLE_BACKGROUND_FIND === '1') return;
     if (this.screenshots.entries.length === 0) return;
     if (this.backgroundFindTimer) clearTimeout(this.backgroundFindTimer);
     this.backgroundFindTimer = setTimeout(() => {
@@ -449,14 +467,22 @@ export class ExtensionController implements vscode.Disposable {
 
     this.backgroundFindRunning = true;
     this.beginMatching(label);
+    let processed = 0;
     try {
       // 一张图只解码/建索引一次，同时测试全部 find pattern。
+      // 后台每批只补 20 张新图，避免一次跑全量卡住界面；增量缓存会让
+      // 下一批跳过已经评估过的截图，直到全部截图覆盖完。
+      const options = { ...this.matcherOptions(), findColorScanLimit: 0 };
       await this.matcher.matchPatternsBatch(
         patterns,
-        this.matcherOptions(),
+        options,
         undefined,
-        (done, total) => this.updateMatchingProgress(done, total),
+        (done, total) => {
+          processed = total;
+          this.updateMatchingProgress(done, total);
+        },
         true,
+        20,
       );
     } catch (error) {
       this.log(`后台找色预匹配失败：${String(error)}`);
@@ -473,9 +499,15 @@ export class ExtensionController implements vscode.Disposable {
       return;
     }
 
+    if (processed > 0) {
+      this.lastMatchSummary = `${label} 本批完成`;
+      this.provider.refresh();
+      this.scheduleBackgroundFindPrecompute(1500);
+      return;
+    }
+
     this.lastMatchSummary = `${label} 完成`;
-    this.log(`[后台找色] ${label} 完成`);
-    // 被功能文件引用的 key 现在一定在缓存里，刷新一次图标。
+    this.log(`[后台找色] ${label} 全量完成`);
     this.provider.refresh();
     if (this.backgroundFindDirty) {
       this.backgroundFindDirty = false;
@@ -495,14 +527,18 @@ export class ExtensionController implements vscode.Disposable {
       const matched = await this.getMatchedTargets(document, range, token);
       if (!matched || token.isCancellationRequested) return [];
       return matched.targets
-        .filter((target) => (matched.state.matchesByPatternId.get(target.pattern.id) ?? []).length > 0)
-        .map((target) =>
-          this.makeHint(
-            document,
-            target,
-            (matched.state.matchesByPatternId.get(target.pattern.id) ?? []).length,
-          ),
-        );
+        .map((target) => ({
+          target,
+          matchCount:
+            matched.state.matchSets.get(target.stateKey)?.matches.length ??
+            combineMatches(
+              targetPatterns(target).map(
+                (pattern) => matched.state.matchesByPatternId.get(pattern.id) ?? [],
+              ),
+            ).length,
+        }))
+        .filter((item) => item.matchCount > 0)
+        .map((item) => this.makeHint(document, item.target, item.matchCount));
     } catch (error) {
       this.log(`解析/匹配失败：${document.fileName}（${String(error)}）`);
       return [];
@@ -533,9 +569,11 @@ export class ExtensionController implements vscode.Disposable {
 
     const pendingPatterns = Array.from(
       new Map(
-        matchTargets
-          .filter((target) => !state.matchesByPatternId.has(target.pattern.id))
-          .map((target) => [target.pattern.id, target.pattern]),
+        matchTargets.flatMap((target) =>
+          targetPatterns(target)
+            .filter((pattern) => !state.matchesByPatternId.has(pattern.id))
+            .map((pattern) => [pattern.id, pattern] as const),
+        ),
       ).values(),
     );
     const findCount = pendingPatterns.filter((pattern) => pattern.kind === 'find').length;
@@ -571,7 +609,11 @@ export class ExtensionController implements vscode.Disposable {
     if (token.isCancellationRequested) return undefined;
 
     for (const target of matchTargets) {
-      const matches = state.matchesByPatternId.get(target.pattern.id) ?? [];
+      const matches = combineMatches(
+        targetPatterns(target).map(
+          (pattern) => state.matchesByPatternId.get(pattern.id) ?? [],
+        ),
+      );
       if (matches.length === 0) continue;
       state.matchSets.set(
         target.stateKey,
@@ -764,14 +806,15 @@ export class ExtensionController implements vscode.Disposable {
     // 功能文件里的 findMultiColor* 第一个参数也作为匹配目标。
     for (const call of result.findReferences) {
       await this.ensureFindFor(document.fileName, call.key);
-      const pattern = this.findIndex.resolve(document.fileName, call.key);
-      if (!pattern) continue;
+      const patterns = this.findIndex.resolveAll(document.fileName, call.key);
+      if (patterns.length === 0) continue;
       targets.push({
         // 放在 findMultiColor(...) 右括号后；跳转只覆盖字符串内容。
         anchorOffset: call.anchorOffset,
         label: call.label,
         stateKey: call.id,
-        pattern,
+        pattern: patterns[0],
+        patterns,
       });
     }
 
@@ -935,17 +978,28 @@ export class ExtensionController implements vscode.Disposable {
 
     const target = state.targets.find((item) => item.stateKey === stateKey);
     if (!target) return undefined;
-    let matches = state.matchesByPatternId.get(target.pattern.id);
-    if (!matches) {
+    const patterns = targetPatterns(target);
+    const missing = patterns.filter(
+      (pattern) => !state.matchesByPatternId.has(pattern.id),
+    );
+    if (missing.length > 0) {
       this.beginMatching('预览匹配');
       try {
-        matches = await this.matcher.matchPattern(target.pattern, this.matcherOptions());
-        state.matchesByPatternId.set(target.pattern.id, matches);
+        const matched = await this.matcher.matchPatternsBatch(
+          missing,
+          this.matcherOptions(),
+        );
+        for (const [patternId, matches] of matched) {
+          state.matchesByPatternId.set(patternId, matches);
+        }
         this.lastMatchSummary = '预览匹配完成';
       } finally {
         this.endMatching();
       }
     }
+    const matches = combineMatches(
+      patterns.map((pattern) => state.matchesByPatternId.get(pattern.id) ?? []),
+    );
     if (matches.length === 0) return undefined;
     const set = this.matcher.makeMatchSet(stateKey, target.label, target.pattern, matches);
     state.matchSets.set(stateKey, set);
@@ -979,16 +1033,10 @@ export class ExtensionController implements vscode.Disposable {
         workspaceFolders,
         cwd,
       });
-      // 新进程第一次扫描时内存指纹为空，ScreenshotIndex 必然返回 changed；
-      // 先看磁盘缓存是否已经是同一批截图，避免启动时白白清掉缓存。
-      const reusedDiskCache =
-        changed &&
-        (await this.matcher.hasDiskCache(
-          this.screenshots.currentFingerprint,
-          this.matcherOptions(),
-        ));
-      if (changed && !reusedDiskCache) {
-        this.matcher.invalidate();
+      const firstScan = !this.hasScannedScreenshots;
+      this.hasScannedScreenshots = true;
+      if (changed) {
+        // 只清 UI 状态，不清匹配缓存；MatcherService 会按截图指纹增量补匹配。
         this.invalidateAll();
         this.refreshMarkerProviders();
         this.scheduleProjectPrecompute();
@@ -1000,11 +1048,11 @@ export class ExtensionController implements vscode.Disposable {
         `[${reason}] 扫描到 ${this.screenshots.entries.length} 张截图${
           this.screenshots.resolutionSummary ? `（${this.screenshots.resolutionSummary}）` : ''
         }${
-          reusedDiskCache
-            ? '，首次扫描指纹与磁盘缓存一致，复用已有匹配缓存'
-            : changed
-              ? '，截图集合有变化，已重新匹配'
-              : '，截图集合未变化，复用已有匹配缓存'
+          changed
+            ? firstScan
+              ? '，首次扫描，使用增量缓存'
+              : '，截图集合有变化，保留旧结果并增量匹配新增截图'
+            : '，截图集合未变化，复用已有匹配缓存'
         }`,
       );
       for (const error of this.screenshots.errors) this.log(`  - ${error}`);

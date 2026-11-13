@@ -12,9 +12,9 @@ afterAll(async () => {
 });
 
 describe('MatchDiskCache', () => {
-  it('按截图指纹和参数持久化并复用匹配结果', async () => {
+  it('按参数持久化 pattern 结果和已评估截图', async () => {
     const cache = new MatchDiskCache(cachePath);
-    await cache.ensure('fingerprint-a', 'options-a');
+    await cache.ensure('options-a');
     const matches: ScreenshotMatch[] = [
       {
         path: 'C:/shots/a.png',
@@ -24,22 +24,20 @@ describe('MatchDiskCache', () => {
         points: [{ x: 10, y: 20 }],
       },
     ];
-    cache.set('pattern-a', matches);
+    cache.set('pattern-a', {
+      matches,
+      evaluated: { 'C:/shots/a.png': '100|200|1280x720' },
+    });
     await cache.flush();
 
-    const current = new MatchDiskCache(cachePath);
-    expect(await current.isCurrent('fingerprint-a', 'options-a')).toBe(true);
-    expect(await current.isCurrent('fingerprint-b', 'options-a')).toBe(false);
-    expect(await current.isCurrent('fingerprint-a', 'options-b')).toBe(false);
-
     const reopened = new MatchDiskCache(cachePath);
-    await reopened.ensure('fingerprint-a', 'options-a');
-    expect(reopened.get('pattern-a')).toEqual(matches);
+    await reopened.ensure('options-a');
+    expect(reopened.get('pattern-a')).toEqual({
+      matches,
+      evaluated: { 'C:/shots/a.png': '100|200|1280x720' },
+    });
 
-    await reopened.ensure('fingerprint-b', 'options-a');
-    expect(reopened.get('pattern-a')).toBeUndefined();
-
-    await reopened.ensure('fingerprint-a', 'options-b');
+    await reopened.ensure('options-b');
     expect(reopened.get('pattern-a')).toBeUndefined();
   });
 });

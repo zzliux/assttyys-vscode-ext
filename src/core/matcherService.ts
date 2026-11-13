@@ -5,8 +5,8 @@ import type {
   PatternDefinition,
   ScreenshotMatch,
 } from './model';
-import type { ScreenshotIndex } from './screenshotIndex';
-import type { MatchDiskCache } from './matchDiskCache';
+import type { ScreenshotEntry, ScreenshotIndex } from './screenshotIndex';
+import type { MatchDiskCache, PatternCacheEntry } from './matchDiskCache';
 import { decodeImageFile } from './imageLoader';
 import { matchDetect, matchFind } from './matcher';
 
@@ -14,24 +14,18 @@ export interface MatchCancellation {
   readonly isCancellationRequested: boolean;
 }
 
-interface MatchCacheItem {
-  generation: number;
+interface InMemoryCacheItem {
   optionsKey: string;
+  entry: PatternCacheEntry;
+}
+
+interface PendingPattern {
+  pattern: PatternDefinition;
   matches: ScreenshotMatch[];
-}
-
-function optionsKey(options: MatcherOptions): string {
-  return [
-    options.colorSimilarity,
-    options.findColorSimilarity,
-    options.findColorOffset,
-    options.maxMatchesPerPattern,
-    options.findColorScanLimit ?? 'all',
-  ].join('|');
-}
-
-function resolutionKey(pattern: PatternDefinition): string {
-  return `${pattern.resolution.width}x${pattern.resolution.height}`;
+  evaluated: Record<string, string>;
+  candidates: ScreenshotEntry[];
+  candidatePaths: Set<string>;
+  pending: Map<string, ScreenshotEntry>;
 }
 
 /**
@@ -39,7 +33,26 @@ function resolutionKey(pattern: PatternDefinition): string {
  *
  * 文件版本号、行号、key/label 都不参与，所以只改注释、调整排版、甚至改描述
  * 文字时，只要 desc 的坐标/颜色/容差没变，就能命中旧缓存。
+ *
+ * 找色扫描张数不参与签名：扫描范围只影响“还没评估哪些图”，不影响已有结果。
  */
+function optionsKey(options: MatcherOptions): string {
+  return [
+    options.colorSimilarity,
+    options.findColorSimilarity,
+    options.findColorOffset,
+    options.maxMatchesPerPattern,
+  ].join('|');
+}
+
+function resolutionKey(pattern: PatternDefinition): string {
+  return `${pattern.resolution.width}x${pattern.resolution.height}`;
+}
+
+function screenshotKey(entry: ScreenshotEntry): string {
+  return `${entry.mtimeMs}|${entry.size}|${entry.width}x${entry.height}`;
+}
+
 function patternSignature(pattern: PatternDefinition): string {
   const payload = JSON.stringify({
     kind: pattern.kind,
@@ -52,13 +65,13 @@ function patternSignature(pattern: PatternDefinition): string {
 }
 
 /**
- * 把定义、截图索引和图片缓存串起来。
+ * 把定义、截图索引和增量缓存串起来。
  *
- * 大量截图时，按“每张图只解码一次、同时测试多个 desc”的方式匹配，避免
- * 每个 desc 都重新扫描/解码所有截图。
+ * 匹配按“每张图解码一次、同时测试多个 desc”执行；缓存按 pattern 记录
+ * 已经评估过的截图，新增截图只补匹配新图，不会清空旧结果。
  */
 export class MatcherService {
-  private readonly cache = new Map<string, MatchCacheItem>();
+  private readonly cache = new Map<string, InMemoryCacheItem>();
   private onError: (message: string) => void = () => {};
 
   constructor(
@@ -68,10 +81,6 @@ export class MatcherService {
 
   setErrorHandler(handler: (message: string) => void): void {
     this.onError = handler;
-  }
-
-  async hasDiskCache(fingerprint: string, options: MatcherOptions): Promise<boolean> {
-    return (await this.diskCache?.isCurrent(fingerprint, optionsKey(options))) ?? false;
   }
 
   async matchPattern(
@@ -84,8 +93,7 @@ export class MatcherService {
   }
 
   /**
-   * 批量匹配：同一分辨率的截图只解码一次，对每张图依次测试所有未完成的
-   * pattern。已经命中 maxMatchesPerPattern 的 pattern 会提前退出。
+   * 批量匹配。图片在外层，一次解码同时测试所有还没评估过该图的 pattern。
    */
   async matchPatternsBatch(
     patterns: PatternDefinition[],
@@ -93,68 +101,92 @@ export class MatcherService {
     token?: MatchCancellation,
     onProgress?: (done: number, total: number) => void,
     yieldToUi = false,
+    maxNewImages = 0,
   ): Promise<Map<string, ScreenshotMatch[]>> {
     const result = new Map<string, ScreenshotMatch[]>();
-    const signature = optionsKey(options);
-    const generation = this.screenshots.generation;
-    const pendingById = new Map<string, PatternDefinition>();
     if (token?.isCancellationRequested) return result;
-    await this.diskCache?.ensure(this.screenshots.currentFingerprint, signature);
+
+    const signature = optionsKey(options);
+    await this.diskCache?.ensure(signature);
+    const generation = this.screenshots.generation;
+    const allPaths = new Set(this.screenshots.entries.map((entry) => entry.path));
+    const groups = new Map<string, PendingPattern[]>();
 
     for (const pattern of patterns) {
-      if (pendingById.has(pattern.id)) continue;
-      const cached = this.getCached(patternSignature(pattern), signature);
-      if (cached) {
-        result.set(pattern.id, cached);
-      } else {
-        pendingById.set(pattern.id, pattern);
+      const cached = this.getCached(patternSignature(pattern), signature) ?? {
+        matches: [],
+        evaluated: {},
+      };
+      const matches = cached.matches.filter((match) => allPaths.has(match.path));
+      const evaluated: Record<string, string> = {};
+      for (const [filePath, key] of Object.entries(cached.evaluated)) {
+        if (allPaths.has(filePath)) evaluated[filePath] = key;
       }
-    }
-    if (pendingById.size === 0) return result;
 
-    const groups = new Map<string, PatternDefinition[]>();
-    for (const pattern of pendingById.values()) {
-      const key = `${resolutionKey(pattern)}|${pattern.kind === 'find' ? 'find' : 'detect'}`;
-      const group = groups.get(key);
-      if (group) group.push(pattern);
-      else groups.set(key, [pattern]);
-    }
-
-    for (const group of groups.values()) {
-      const first = group[0];
-      let candidates = this.screenshots.candidates(
-        first.resolution.width,
-        first.resolution.height,
-      );
-      if (first.kind === 'find' && options.findColorScanLimit) {
-        candidates = candidates.slice(0, options.findColorScanLimit);
+      const candidates = this.candidatesFor(pattern, options);
+      const candidatePaths = new Set(candidates.map((entry) => entry.path));
+      const pending = new Map<string, ScreenshotEntry>();
+      for (const entry of candidates) {
+        const key = screenshotKey(entry);
+        if (evaluated[entry.path] === key) continue;
+        const existingIndex = matches.findIndex((match) => match.path === entry.path);
+        if (existingIndex >= 0) matches.splice(existingIndex, 1);
+        pending.set(entry.path, entry);
       }
-      const partial = new Map<string, ScreenshotMatch[]>();
-      for (const pattern of group) partial.set(pattern.id, []);
 
-      if (candidates.length === 0) {
-        for (const pattern of group) {
-          result.set(pattern.id, []);
-          this.setCached(patternSignature(pattern), signature, []);
-        }
+      const state: PendingPattern = {
+        pattern,
+        matches,
+        evaluated,
+        candidates,
+        candidatePaths,
+        pending,
+      };
+      if (matches.length >= options.maxMatchesPerPattern) {
+        for (const entry of pending.values()) evaluated[entry.path] = screenshotKey(entry);
+        pending.clear();
+      }
+
+      if (pending.size === 0) {
+        result.set(
+          pattern.id,
+          matches.filter((match) => candidatePaths.has(match.path)),
+        );
+        this.setCached(patternSignature(pattern), signature, {
+          matches,
+          evaluated,
+        });
         continue;
       }
 
-      const active = new Map<string, PatternDefinition>(
-        group.map((pattern) => [pattern.id, pattern]),
-      );
+      const key = `${resolutionKey(pattern)}|${pattern.kind === 'find' ? 'find' : 'detect'}`;
+      const group = groups.get(key);
+      if (group) group.push(state);
+      else groups.set(key, [state]);
+    }
+
+    for (const group of groups.values()) {
+      const candidates = new Map<string, ScreenshotEntry>();
+      for (const state of group) {
+        for (const entry of state.pending.values()) candidates.set(entry.path, entry);
+      }
+      if (candidates.size === 0) continue;
+
+      const active = new Map(group.map((state) => [state.pattern.id, state]));
       let nextIndex = 0;
       let processed = 0;
-      const total = candidates.length;
+      const allCandidates = Array.from(candidates.values());
+      // 后台按批处理时只取前 N 张尚未评估的新图，剩余留给下一批。
+      const list =
+        maxNewImages > 0 ? allCandidates.slice(0, maxNewImages) : allCandidates;
+      const total = list.length;
 
       const worker = async (): Promise<void> => {
-        // 批量匹配一旦开始就做完并写缓存。VS Code 在滚动时会取消旧的 hint
-        // 请求，如果这里中途放弃，下一次滚动又要重新解码全部截图。
         while (true) {
           if (active.size === 0) break;
           const index = nextIndex++;
-          if (index >= candidates.length) break;
-          const entry = candidates[index];
+          if (index >= list.length) break;
+          const entry = list[index];
           let image;
           try {
             image = await decodeImageFile(entry.path);
@@ -163,41 +195,44 @@ export class MatcherService {
             continue;
           }
           if (
-            image.width !== first.resolution.width ||
-            image.height !== first.resolution.height
+            image.width !== group[0].pattern.resolution.width ||
+            image.height !== group[0].pattern.resolution.height
           ) {
             continue;
           }
 
           let handled = 0;
-          for (const [id, pattern] of active) {
-            if (partial.get(id)!.length >= options.maxMatchesPerPattern) {
-              active.delete(id);
-              continue;
-            }
+          for (const [id, state] of active) {
+            if (!state.pending.has(entry.path)) continue;
             const match =
-              pattern.kind === 'find'
+              state.pattern.kind === 'find'
                 ? matchFind(
                     image,
-                    pattern,
-                    pattern.similarity ?? options.findColorSimilarity,
+                    state.pattern,
+                    state.pattern.similarity ?? options.findColorSimilarity,
                     options.findColorOffset,
                   )
-                : matchDetect(image, pattern, options.colorSimilarity);
-            if (!match) continue;
-            partial.get(id)!.push({
-              path: entry.path,
-              width: image.width,
-              height: image.height,
-              anchor: match.anchor,
-              points: match.points,
-            });
-            if (partial.get(id)!.length >= options.maxMatchesPerPattern) {
+                : matchDetect(image, state.pattern, options.colorSimilarity);
+            state.evaluated[entry.path] = screenshotKey(entry);
+            state.pending.delete(entry.path);
+            if (match) {
+              state.matches.push({
+                path: entry.path,
+                width: image.width,
+                height: image.height,
+                anchor: match.anchor,
+                points: match.points,
+              });
+            }
+            if (state.matches.length >= options.maxMatchesPerPattern) {
+              // 已达上限，剩余图片不需要再逐像素搜索。
+              for (const rest of state.pending.values()) {
+                state.evaluated[rest.path] = screenshotKey(rest);
+              }
+              state.pending.clear();
               active.delete(id);
             }
             handled++;
-            // 后台全量找色时把一张图的 pattern 循环切成小段，避免长时间
-            // 占用扩展宿主线程；前台匹配保持连续执行。
             if (yieldToUi && handled % 32 === 0) {
               await new Promise<void>((resolve) => setImmediate(resolve));
             }
@@ -211,48 +246,64 @@ export class MatcherService {
         }
       };
 
-      const concurrency = Math.min(8, candidates.length);
+      const concurrency = Math.min(8, list.length);
       await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
-      // 匹配期间截图集合变了，这批结果不能写入新 generation 的缓存。
       if (generation !== this.screenshots.generation) return result;
 
-      for (const pattern of group) {
-        const matches = partial.get(pattern.id) ?? [];
-        result.set(pattern.id, matches);
-        this.setCached(patternSignature(pattern), signature, matches);
+      for (const state of group) {
+        state.matches = state.matches.filter((match) => allPaths.has(match.path));
+        result.set(
+          state.pattern.id,
+          state.matches.filter((match) => state.candidatePaths.has(match.path)),
+        );
+        this.setCached(patternSignature(state.pattern), signature, {
+          matches: state.matches,
+          evaluated: state.evaluated,
+        });
       }
     }
 
     return result;
   }
 
-  private getCached(
-    patternKey: string,
-    optionsSignature: string,
-  ): ScreenshotMatch[] | undefined {
-    const cached = this.cache.get(patternKey);
-    if (
-      cached &&
-      cached.generation === this.screenshots.generation &&
-      cached.optionsKey === optionsSignature
-    ) {
-      return cached.matches;
+  private candidatesFor(
+    pattern: PatternDefinition,
+    options: MatcherOptions,
+  ): ScreenshotEntry[] {
+    const candidates = this.screenshots.candidates(
+      pattern.resolution.width,
+      pattern.resolution.height,
+    );
+    if (pattern.kind === 'find' && options.findColorScanLimit) {
+      return candidates.slice(0, options.findColorScanLimit);
     }
-    return this.diskCache?.get(patternKey);
+    return candidates;
+  }
+
+  private getCached(patternKey: string, optionsSignature: string): PatternCacheEntry | undefined {
+    const cached = this.cache.get(patternKey);
+    if (cached && cached.optionsKey === optionsSignature) {
+      return {
+        matches: [...cached.entry.matches],
+        evaluated: { ...cached.entry.evaluated },
+      };
+    }
+    const disk = this.diskCache?.get(patternKey);
+    if (!disk) return undefined;
+    return {
+      matches: [...disk.matches],
+      evaluated: { ...disk.evaluated },
+    };
   }
 
   private setCached(
     patternKey: string,
     optionsSignature: string,
-    matches: ScreenshotMatch[],
+    entry: PatternCacheEntry,
   ): void {
-    this.cache.set(patternKey, {
-      generation: this.screenshots.generation,
-      optionsKey: optionsSignature,
-      matches,
-    });
-    this.diskCache?.set(patternKey, matches);
+    this.cache.set(patternKey, { optionsKey: optionsSignature, entry });
+    this.diskCache?.set(patternKey, entry);
     if (this.cache.size > 2000) {
       const oldest = this.cache.keys().next().value as string | undefined;
       if (oldest) this.cache.delete(oldest);

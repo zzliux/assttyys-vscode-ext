@@ -32,6 +32,34 @@ export class DetectPatternIndex {
     this.allByDirectory.delete(dir);
   }
 
+  /**
+   * 同一个 key 在 multiFindColors 里可能有多个 desc 分组。
+   * 导航只需要第一个，但截图图标必须拿到全部，否则会漏掉后面分组的命中。
+   */
+  resolveAll(fromFile: string, key: string): PatternDefinition[] {
+    const source = path.resolve(fromFile);
+    let bestDir = '';
+    let best: PatternDefinition[] = [];
+    for (const [dir, list] of this.allByDirectory) {
+      if (!source.startsWith(dir + path.sep) && source !== dir) continue;
+      if (dir.length < bestDir.length) continue;
+      const matches = list.filter((pattern) => pattern.key === key);
+      if (matches.length > 0) {
+        bestDir = dir;
+        best = matches;
+      }
+    }
+    if (best.length > 0) return best;
+
+    const matches: PatternDefinition[] = [];
+    for (const list of this.allByDirectory.values()) {
+      for (const pattern of list) {
+        if (pattern.key === key) matches.push(pattern);
+      }
+    }
+    return matches;
+  }
+
   resolve(fromFile: string, key: string): PatternDefinition | undefined {
     const source = path.resolve(fromFile);
     let bestDir = '';

@@ -65,8 +65,6 @@ describe('MatcherService', () => {
     expect(matches[0].height).toBe(720);
 
     // 同一个 desc 只改 id/version/行号时，应命中签名缓存，不再解码文件。
-    // 删除图片后如果仍返回旧结果，说明缓存生效。
-    await fs.rm(imagePath);
     const renamedPattern = {
       ...pattern!,
       id: 'another-id',
@@ -77,5 +75,29 @@ describe('MatcherService', () => {
     const cachedMatches = await service.matchPattern(renamedPattern, options);
     expect(cachedMatches).toHaveLength(1);
     expect(cachedMatches[0].path).toBe(imagePath);
+
+    // 新增截图只补匹配新图，旧结果保留。
+    const secondImagePath = path.join(testDir, 'match-2.png');
+    await fs.writeFile(secondImagePath, PNG.sync.write(png));
+    await screenshots.rebuild([testDir], {
+      includeSubfolders: true,
+      extensions: ['png'],
+      workspaceFolders: [],
+      cwd: testDir,
+    });
+    const incrementalMatches = await service.matchPattern(renamedPattern, options);
+    expect(incrementalMatches).toHaveLength(2);
+
+    // 截图删除后，增量缓存应丢弃对应路径。
+    await fs.rm(imagePath);
+    await fs.rm(secondImagePath);
+    await screenshots.rebuild([testDir], {
+      includeSubfolders: true,
+      extensions: ['png'],
+      workspaceFolders: [],
+      cwd: testDir,
+    });
+    const removedMatches = await service.matchPattern(renamedPattern, options);
+    expect(removedMatches).toHaveLength(0);
   });
 });

@@ -121,6 +121,8 @@ export default new Func999();
 }
 
 (async () => {
+  // 测试时不启动后台全量找色，避免抢占扩展宿主 CPU。
+  process.env.ASSTTYYS_DISABLE_BACKGROUND_FIND = '1';
   // DSH/部分终端会设置该变量，VS Code 会以 Node 模式启动而不是 GUI。
   delete process.env.ELECTRON_RUN_AS_NODE;
   if (!process.env.WORKSPACE_PATH) prepareWorkspace();

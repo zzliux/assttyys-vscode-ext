@@ -2,11 +2,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ScreenshotMatch } from './model';
 
+export interface PatternCacheEntry {
+  matches: ScreenshotMatch[];
+  /** 已评估过的截图：path -> mtime|size|宽x高。 */
+  evaluated: Record<string, string>;
+}
+
 interface CacheFile {
-  version: 1;
-  fingerprint: string;
+  version: 2;
   optionsKey: string;
-  entries: Record<string, ScreenshotMatch[]>;
+  entries: Record<string, PatternCacheEntry>;
 }
 
 const MAX_ENTRIES = 5000;
@@ -14,8 +19,8 @@ const MAX_ENTRIES = 5000;
 /**
  * 把“desc 签名 -> 匹配截图”持久化到扩展的 globalStorage。
  *
- * 截图集合（fingerprint）或匹配参数变化时整个缓存作废；同一个 desc 只改
- * 注释/排版时签名不变，重启 VS Code 后也能直接复用。
+ * 缓存不绑定整批截图的指纹，而是按 pattern 记录已经评估过哪些截图；
+ * 新增截图只补匹配新图，删除/修改截图只丢掉对应结果。
  */
 export class MatchDiskCache {
   private data: CacheFile | null = null;
@@ -26,24 +31,21 @@ export class MatchDiskCache {
 
   constructor(private readonly filePath: string) {}
 
-  async ensure(fingerprint: string, optionsKey: string): Promise<void> {
-    const key = `${fingerprint}\u0000${optionsKey}`;
-    if (this.data && this.loadedFor === key) return;
-    this.loadedFor = key;
+  async ensure(optionsKey: string): Promise<void> {
+    if (this.data && this.loadedFor === optionsKey) return;
+    this.loadedFor = optionsKey;
 
     try {
       const raw = await fs.readFile(this.filePath, 'utf8');
       const parsed = JSON.parse(raw) as Partial<CacheFile>;
       if (
-        parsed.version === 1 &&
-        parsed.fingerprint === fingerprint &&
+        parsed.version === 2 &&
         parsed.optionsKey === optionsKey &&
         parsed.entries &&
         typeof parsed.entries === 'object'
       ) {
         this.data = {
-          version: 1,
-          fingerprint,
+          version: 2,
           optionsKey,
           entries: parsed.entries,
         };
@@ -53,36 +55,16 @@ export class MatchDiskCache {
       // 文件不存在、损坏或版本不匹配时从空缓存开始。
     }
 
-    this.data = { version: 1, fingerprint, optionsKey, entries: {} };
+    this.data = { version: 2, optionsKey, entries: {} };
   }
 
-  /**
-   * 磁盘缓存的截图指纹/参数是否与当前一致。
-   *
-   * 首次启动时内存里没有上一次扫描的指纹，ScreenshotIndex 会把第一次扫描
-   * 当成“变化”；用这个检查可以避免无谓地清掉仍然有效的磁盘缓存。
-   */
-  async isCurrent(fingerprint: string, optionsKey: string): Promise<boolean> {
-    try {
-      const raw = await fs.readFile(this.filePath, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<CacheFile>;
-      return (
-        parsed.version === 1 &&
-        parsed.fingerprint === fingerprint &&
-        parsed.optionsKey === optionsKey
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  get(patternKey: string): ScreenshotMatch[] | undefined {
+  get(patternKey: string): PatternCacheEntry | undefined {
     return this.data?.entries[patternKey];
   }
 
-  set(patternKey: string, matches: ScreenshotMatch[]): void {
+  set(patternKey: string, entry: PatternCacheEntry): void {
     if (!this.data) return;
-    this.data.entries[patternKey] = matches;
+    this.data.entries[patternKey] = entry;
     const keys = Object.keys(this.data.entries);
     if (keys.length > MAX_ENTRIES) {
       for (const key of keys.slice(0, keys.length - MAX_ENTRIES)) {
@@ -114,10 +96,12 @@ export class MatchDiskCache {
 
   private scheduleWrite(): void {
     if (this.writeTimer) clearTimeout(this.writeTimer);
+    // 增量缓存可能包含大量已评估截图，降低写盘频率，避免后台每批都
+    // 重新序列化整份缓存。
     this.writeTimer = setTimeout(() => {
       this.writeTimer = undefined;
       void this.writeNow();
-    }, 800);
+    }, 3000);
   }
 
   private async writeNow(): Promise<void> {
