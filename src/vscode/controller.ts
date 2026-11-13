@@ -31,6 +31,7 @@ interface DocumentState {
   configKey: string;
   generation: number;
   detectRevision: number;
+  findRevision: number;
   patterns: PatternDefinition[];
   references: StringReference[];
   targets: HintTarget[];
@@ -89,11 +90,21 @@ export class ExtensionController implements vscode.Disposable {
   private readonly screenshotRefreshTimer: Debounced<[]>;
   private readonly projectPrecomputeTimer: Debounced<[]>;
   private detectRevision = 0;
+  private findRevision = 0;
   private initializing = true;
   private matchingRequests = 0;
+  private matchingLabel = '';
+  private lastProgressUpdate = 0;
+  private lastMatchSummary = '';
+  private cacheHitTimer: ReturnType<typeof setTimeout> | undefined;
   private projectPrecomputePromise: Promise<void> | null = null;
   private projectPrecomputeAgain = false;
   private projectPatternCount = 0;
+  private backgroundFindTimer: ReturnType<typeof setTimeout> | undefined;
+  private backgroundFindGeneration = 0;
+  private backgroundFindRunning = false;
+  private backgroundFindDirty = false;
+  private backgroundFindDeferrals = 0;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.config = readConfig();
@@ -149,6 +160,7 @@ export class ExtensionController implements vscode.Disposable {
     this.updateStatus();
     // 后台预匹配项目内所有比色 desc；第一次打开文件时如果还没完成会等它。
     void this.ensureProjectPrecomputed();
+    this.scheduleBackgroundFindPrecompute(10000);
   }
 
   private registerEvents(): void {
@@ -181,6 +193,8 @@ export class ExtensionController implements vscode.Disposable {
         }
         this.invalidateDocument(document.uri.toString(), document.version);
         this.scheduleProjectPrecompute();
+        this.cancelBackgroundFindPrecompute();
+        this.scheduleBackgroundFindPrecompute(2000);
       }),
       vscode.workspace.onDidOpenTextDocument((document) => {
         if (isDetectFile(document.fileName)) {
@@ -210,6 +224,8 @@ export class ExtensionController implements vscode.Disposable {
     await this.refreshScreenshotsAndMatches('工作区变化');
     this.setupScreenshotWatchers();
     this.scheduleProjectPrecompute();
+    this.cancelBackgroundFindPrecompute();
+    this.scheduleBackgroundFindPrecompute(5000);
   }
 
   private async loadWorkspaceDetectFiles(): Promise<void> {
@@ -268,6 +284,15 @@ export class ExtensionController implements vscode.Disposable {
     const result = extractPatterns(filePath, document.version, document.getText());
     this.loadedFindFiles.set(filePath, document.version);
     this.findIndex.update(filePath, result.patterns);
+    this.findRevision++;
+    this.states.clear();
+    // 打开/保存定义文件不取消正在跑的后台全量，只标记完成后重跑一次，
+    // 避免用户滚动时恰好打开 multiFindColors 导致全量缓存被中断。
+    this.backgroundFindDirty = true;
+    if (!this.backgroundFindRunning) {
+      this.cancelBackgroundFindPrecompute();
+      this.scheduleBackgroundFindPrecompute(2000);
+    }
     this.documentLinkProvider.refresh();
     this.log(`加载找色定义：${filePath}（${result.patterns.length} 条）`);
   }
@@ -326,12 +351,18 @@ export class ExtensionController implements vscode.Disposable {
       this.projectPatternCount = patterns.length;
       if (patterns.length === 0) return;
 
-      this.beginMatching();
+      this.beginMatching(`后台项目比色 ${patterns.length} 个 desc`);
       try {
-        await this.matcher.matchPatternsBatch(patterns, this.matcherOptions());
+        await this.matcher.matchPatternsBatch(
+          patterns,
+          this.matcherOptions(),
+          undefined,
+          (done, total) => this.updateMatchingProgress(done, total),
+        );
       } finally {
         this.endMatching();
       }
+      this.lastMatchSummary = `项目比色 ${patterns.length} 个 desc 完成`;
       this.log(
         `[项目预匹配] ${patterns.length} 个比色 desc，耗时 ${Date.now() - started}ms`,
       );
@@ -379,6 +410,77 @@ export class ExtensionController implements vscode.Disposable {
       }
     }
     return patterns;
+  }
+
+  private scheduleBackgroundFindPrecompute(delay = 1200): void {
+    if (this.screenshots.entries.length === 0) return;
+    if (this.backgroundFindTimer) clearTimeout(this.backgroundFindTimer);
+    this.backgroundFindTimer = setTimeout(() => {
+      this.backgroundFindTimer = undefined;
+      void this.runBackgroundFindPrecompute();
+    }, delay);
+  }
+
+  private cancelBackgroundFindPrecompute(): void {
+    if (this.backgroundFindTimer) {
+      clearTimeout(this.backgroundFindTimer);
+      this.backgroundFindTimer = undefined;
+    }
+    this.backgroundFindGeneration++;
+  }
+
+  private async runBackgroundFindPrecompute(): Promise<void> {
+    if (this.backgroundFindRunning) return;
+    if (this.screenshots.entries.length === 0) return;
+    if (this.matchingRequests > 0 || this.projectPrecomputePromise) {
+      this.backgroundFindDeferrals++;
+      // 用户连续滚动时不能无限推迟后台全量，最多避让几轮后照常启动。
+      if (this.backgroundFindDeferrals < 5) {
+        this.scheduleBackgroundFindPrecompute(2000);
+        return;
+      }
+    }
+    this.backgroundFindDeferrals = 0;
+
+    const patterns = this.findIndex.getAll();
+    if (patterns.length === 0) return;
+    const generation = this.backgroundFindGeneration;
+    const label = `后台找色 全部 ${patterns.length} 个 desc`;
+
+    this.backgroundFindRunning = true;
+    this.beginMatching(label);
+    try {
+      // 一张图只解码/建索引一次，同时测试全部 find pattern。
+      await this.matcher.matchPatternsBatch(
+        patterns,
+        this.matcherOptions(),
+        undefined,
+        (done, total) => this.updateMatchingProgress(done, total),
+        true,
+      );
+    } catch (error) {
+      this.log(`后台找色预匹配失败：${String(error)}`);
+    } finally {
+      this.backgroundFindRunning = false;
+      this.endMatching();
+    }
+
+    if (generation !== this.backgroundFindGeneration) {
+      // 期间截图或 find 定义变化，重新排一次。
+      if (this.screenshots.entries.length > 0) {
+        this.scheduleBackgroundFindPrecompute(3000);
+      }
+      return;
+    }
+
+    this.lastMatchSummary = `${label} 完成`;
+    this.log(`[后台找色] ${label} 完成`);
+    // 被功能文件引用的 key 现在一定在缓存里，刷新一次图标。
+    this.provider.refresh();
+    if (this.backgroundFindDirty) {
+      this.backgroundFindDirty = false;
+      this.scheduleBackgroundFindPrecompute(2000);
+    }
   }
 
   async provideHints(
@@ -436,21 +538,35 @@ export class ExtensionController implements vscode.Disposable {
           .map((target) => [target.pattern.id, target.pattern]),
       ).values(),
     );
+    const findCount = pendingPatterns.filter((pattern) => pattern.kind === 'find').length;
+    const detectCount = pendingPatterns.length - findCount;
+    const matchLabel =
+      findCount > 0 && detectCount > 0
+        ? `找色 ${findCount} 个 · 比色 ${detectCount} 个 desc`
+        : findCount > 0
+          ? `找色 ${findCount} 个 desc`
+          : `比色 ${detectCount} 个 desc`;
+
     if (pendingPatterns.length > 0) {
-      this.beginMatching();
+      this.beginMatching(matchLabel);
       try {
         const matched = await this.matcher.matchPatternsBatch(
           pendingPatterns,
           this.matcherOptions(),
           token as MatchCancellation,
+          (done, total) => this.updateMatchingProgress(done, total),
         );
         for (const [patternId, matches] of matched) {
           state.matchesByPatternId.set(patternId, matches);
         }
+        this.lastMatchSummary = `${matchLabel} 完成`;
         if (token.isCancellationRequested) return undefined;
       } finally {
         this.endMatching();
       }
+    } else {
+      this.lastMatchSummary = '缓存命中';
+      this.showCacheHitStatus();
     }
     if (token.isCancellationRequested) return undefined;
 
@@ -575,7 +691,8 @@ export class ExtensionController implements vscode.Disposable {
       cached.version === document.version &&
       cached.configKey === configKey(this.config) &&
       cached.generation === this.screenshots.generation &&
-      cached.detectRevision === this.detectRevision
+      cached.detectRevision === this.detectRevision &&
+      cached.findRevision === this.findRevision
     ) {
       return cached;
     }
@@ -644,11 +761,26 @@ export class ExtensionController implements vscode.Disposable {
       });
     }
 
+    // 功能文件里的 findMultiColor* 第一个参数也作为匹配目标。
+    for (const call of result.findReferences) {
+      await this.ensureFindFor(document.fileName, call.key);
+      const pattern = this.findIndex.resolve(document.fileName, call.key);
+      if (!pattern) continue;
+      targets.push({
+        // 放在 findMultiColor(...) 右括号后；跳转只覆盖字符串内容。
+        anchorOffset: call.anchorOffset,
+        label: call.label,
+        stateKey: call.id,
+        pattern,
+      });
+    }
+
     const state: DocumentState = {
       version: document.version,
       configKey: configKey(this.config),
       generation: this.screenshots.generation,
       detectRevision: this.detectRevision,
+      findRevision: this.findRevision,
       patterns: result.patterns,
       references: result.references,
       targets,
@@ -805,10 +937,11 @@ export class ExtensionController implements vscode.Disposable {
     if (!target) return undefined;
     let matches = state.matchesByPatternId.get(target.pattern.id);
     if (!matches) {
-      this.beginMatching();
+      this.beginMatching('预览匹配');
       try {
         matches = await this.matcher.matchPattern(target.pattern, this.matcherOptions());
         state.matchesByPatternId.set(target.pattern.id, matches);
+        this.lastMatchSummary = '预览匹配完成';
       } finally {
         this.endMatching();
       }
@@ -846,17 +979,33 @@ export class ExtensionController implements vscode.Disposable {
         workspaceFolders,
         cwd,
       });
-      if (changed) {
+      // 新进程第一次扫描时内存指纹为空，ScreenshotIndex 必然返回 changed；
+      // 先看磁盘缓存是否已经是同一批截图，避免启动时白白清掉缓存。
+      const reusedDiskCache =
+        changed &&
+        (await this.matcher.hasDiskCache(
+          this.screenshots.currentFingerprint,
+          this.matcherOptions(),
+        ));
+      if (changed && !reusedDiskCache) {
         this.matcher.invalidate();
         this.invalidateAll();
         this.refreshMarkerProviders();
         this.scheduleProjectPrecompute();
+        this.cancelBackgroundFindPrecompute();
+        this.scheduleBackgroundFindPrecompute(5000);
       }
       this.updateStatus();
       this.log(
         `[${reason}] 扫描到 ${this.screenshots.entries.length} 张截图${
           this.screenshots.resolutionSummary ? `（${this.screenshots.resolutionSummary}）` : ''
-        }${changed ? '，截图集合有变化，已重新匹配' : '，截图集合未变化，复用已有匹配缓存'}`,
+        }${
+          reusedDiskCache
+            ? '，首次扫描指纹与磁盘缓存一致，复用已有匹配缓存'
+            : changed
+              ? '，截图集合有变化，已重新匹配'
+              : '，截图集合未变化，复用已有匹配缓存'
+        }`,
       );
       for (const error of this.screenshots.errors) this.log(`  - ${error}`);
     } catch (error) {
@@ -881,6 +1030,8 @@ export class ExtensionController implements vscode.Disposable {
     this.setupScreenshotWatchers();
     await this.refreshScreenshotsAndMatches('配置变化');
     this.scheduleProjectPrecompute();
+    this.cancelBackgroundFindPrecompute();
+    this.scheduleBackgroundFindPrecompute(5000);
   }
 
   async showStats(): Promise<void> {
@@ -1033,20 +1184,54 @@ export class ExtensionController implements vscode.Disposable {
     this.statusBar.tooltip = '正在扫描配置的截图目录';
   }
 
-  private beginMatching(): void {
+  private beginMatching(label: string): void {
+    this.clearCacheHitTimer();
     this.matchingRequests++;
     if (this.matchingRequests === 1) {
-      this.statusBar.text = '$(sync~spin) 匹配截图...';
-      this.statusBar.tooltip = '正在解码截图并匹配当前可见的 desc';
+      this.matchingLabel = label;
+      this.lastProgressUpdate = 0;
+      this.statusBar.text = `$(sync~spin) ${label}`;
+      this.statusBar.tooltip = `正在匹配：${label}`;
     }
+  }
+
+  private updateMatchingProgress(done: number, total: number): void {
+    if (this.matchingRequests === 0) return;
+    const now = Date.now();
+    if (done < total && now - this.lastProgressUpdate < 100) return;
+    this.lastProgressUpdate = now;
+    this.statusBar.text = `$(sync~spin) ${this.matchingLabel} · 图 ${done}/${total}`;
+    this.statusBar.tooltip = `${this.matchingLabel}\n\n已处理截图：${done}/${total}`;
   }
 
   private endMatching(): void {
     this.matchingRequests = Math.max(0, this.matchingRequests - 1);
-    if (this.matchingRequests === 0) this.updateStatus();
+    if (this.matchingRequests === 0) {
+      this.matchingLabel = '';
+      this.updateStatus();
+    }
+  }
+
+  private showCacheHitStatus(): void {
+    if (this.matchingRequests > 0) return;
+    this.clearCacheHitTimer();
+    this.statusBar.text = `$(check) 缓存命中 · 截图 ${this.screenshots.entries.length}`;
+    this.statusBar.tooltip = '当前文件的 desc 已命中匹配缓存，无需重新解码截图';
+    this.cacheHitTimer = setTimeout(() => {
+      this.cacheHitTimer = undefined;
+      this.updateStatus();
+    }, 1500);
+  }
+
+  private clearCacheHitTimer(): void {
+    if (this.cacheHitTimer) {
+      clearTimeout(this.cacheHitTimer);
+      this.cacheHitTimer = undefined;
+    }
   }
 
   private updateStatus(): void {
+    this.clearCacheHitTimer();
     if (this.config.screenshotPaths.length === 0) {
       this.statusBar.text = '$(camera) 未配置截图目录';
       this.statusBar.tooltip = '点击运行 Assttyys: 刷新截图与匹配；或打开设置配置 assttyys.screenshotPaths';
@@ -1064,6 +1249,9 @@ export class ExtensionController implements vscode.Disposable {
     tooltip.appendMarkdown(`找色扫描：最近 ${this.config.findColorScanLimit} 张\n\n`);
     if (this.screenshots.scannedAt) {
       tooltip.appendMarkdown(`最后扫描：${this.screenshots.scannedAt.toLocaleString()}\n\n`);
+    }
+    if (this.lastMatchSummary) {
+      tooltip.appendMarkdown(`最近匹配：${this.lastMatchSummary}\n\n`);
     }
     tooltip.appendMarkdown('点击刷新截图与匹配。');
     this.statusBar.tooltip = tooltip;
@@ -1083,6 +1271,8 @@ export class ExtensionController implements vscode.Disposable {
     this.findReloadTimer.cancel();
     this.screenshotRefreshTimer.cancel();
     this.projectPrecomputeTimer.cancel();
+    this.cancelBackgroundFindPrecompute();
+    this.clearCacheHitTimer();
     void this.matcher.flushCache();
     for (const watcher of this.screenshotWatchers) watcher.dispose();
     for (const disposable of this.disposables) disposable.dispose();

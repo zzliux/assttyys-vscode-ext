@@ -63,6 +63,30 @@ suite('Assttyys 截图匹配扩展', () => {
     assert.strictEqual(hints.length, 1);
   });
 
+  test('连续点击不同图标时预览标签会更新', async function () {
+    this.timeout(30000);
+    const file = path.join(root, 'src', 'common', 'funcList', '999_测试.ts');
+    const document = await vscode.workspace.openTextDocument(file);
+    const range = new vscode.Range(0, 0, document.lineCount - 1, 0);
+    const token = new vscode.CancellationTokenSource().token;
+    const hints = await api.controller.provideHints(document, range, token);
+    assert.ok(hints.length >= 2);
+
+    const labels = [];
+    for (const hint of hints.slice(0, 2)) {
+      const command = hint.label[0].command;
+      await vscode.commands.executeCommand(command.command, ...command.arguments);
+      await delay(600);
+      const tab = vscode.window.tabGroups.all
+        .flatMap((group) => group.tabs)
+        .find((item) => item.label.includes('截图预览'));
+      assert.ok(tab, '预览面板没有打开');
+      labels.push(tab.label);
+    }
+    assert.notStrictEqual(labels[0], labels[1], '切换预览后标签没有更新');
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
   test('点击图标的命令可以打开预览面板', async function () {
     this.timeout(30000);
     const file = path.join(root, 'src', 'common', 'multiDetectColors.ts');

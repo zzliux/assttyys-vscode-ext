@@ -87,6 +87,15 @@ describe('extractPatterns', () => {
     expect(result.references[0].key).toBe('突破界面_寮');
   });
 
+  it('解析 findMultiColor 第一个字符串参数', () => {
+    const result = parse('funcList/004_接受邀请.ts');
+    const findRef = result.findReferences.find((item) => item.key === '组队探索_宝箱');
+    expect(findRef).toBeDefined();
+    expect(findRef?.label).toBe('find:组队探索_宝箱');
+    expect(findRef?.startOffset).toBeLessThan(findRef!.anchorOffset);
+    expect(findRef!.anchorOffset).toBeGreaterThan(findRef!.startOffset + findRef!.key.length);
+  });
+
   it('解析 dynamic desc 以及 operatorIndex 映射', () => {
     const result = parse('funcList.bak/010_地图进入突破界面.ts');
     expect(result.dynamicReferences).toHaveLength(1);

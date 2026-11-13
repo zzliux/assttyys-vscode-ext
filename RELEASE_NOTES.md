@@ -1,41 +1,66 @@
-# v0.3.1 — 修复预览图标与跳转点击区域冲突
+# v0.4.0 — findMultiColor 图标与状态栏细分
 
 发布日期：2026-11-13
 
-## 修复
+## 新增
 
-- 修复 `desc: 'key'` 和 `desc: thisOperator[N].desc` 位置上的 📷 预览图标与 Ctrl+单击跳转链接点击区域重叠的问题。
-- 字符串/动态 desc 的 📷 图标移到该行行尾，彻底避开跳转链接的文本区域。
-- 字符串引用的跳转范围只包含引号内的内容，不再给引号和图标前的空白加下划线。
-- 图标前不再额外加空格。
-- 现在点击 📷 图标只执行截图预览，不会再同时跳到本文件 `operator[N]` 或 `multiDetectColors.ts`。
-- 点击文字区域仍然执行 Ctrl+单击跳转：
-  - `thisOperator[N]` / `.desc` / `.oper[...]` → 本文件对应 `operator[N]` 字段；
-  - `desc: 'key'` → `multiDetectColors.ts` 对应 **key 行**；
-  - `findMultiColor('key')` → `multiFindColors.ts` 对应 **key 行**。
+### findMultiColor 字符串图标
 
-## 0.3.0 已有功能
+功能文件里的：
 
-- `desc: thisOperator[N].desc` 动态引用显示截图图标，并复用目标 desc 缓存。
-- 支持 `funcList.bak`。
-- 项目级比色预匹配和匹配缓存继续保留。
+```ts
+thisScript.findMultiColor('key')
+thisScript.findMultiColorEx('key')
+thisScript.findMultiColorLoop('key')
+```
+
+第一个字符串参数现在也会显示 📷 匹配图标：
+
+- 命中后在行尾显示图标；
+- 复用 `multiFindColors.ts` 对应 key 的匹配缓存；
+- 未命中或 key 找不到时不显示。
+
+### 状态栏细分
+
+- `后台项目比色 N 个 desc`
+- `找色 N 个 desc`
+- `找色 N 个 · 比色 M 个 desc`
+- 匹配过程中显示 `图 done/total`
+- 缓存命中时短暂显示 `缓存命中 · 截图 N`
+- tooltip 显示最近一次匹配结果
+
+## 后台全量找色预匹配
+
+启动 10 秒后，空闲时自动：
+
+- 用**图优先**方式匹配全部 234 个 find pattern；
+- 修复之前按 key 去重只缓存 140 个分组的问题，同一 key 下的多个 desc 分组现在都会预匹配；
+- 每张图只解码一次、只建一次 R 索引；
+- 同时测试所有 find pattern，而不是按 pattern 分组反复解码；
+- 结果写入 find 缓存，功能文件引用的 key 后续直接命中；
+- 每 32 个 pattern / 每张图 yield 一次，避免长时间卡住界面；
+- 状态栏显示 `后台找色 全部 234 个 desc · 图 done/total`；
+- 打开/保存 find 定义不会中断后台全量，连续滚动最多避让 5 轮后仍会启动；
+- 重启后首次扫描会先比对磁盘缓存指纹，截图没变时直接复用，不再误报“截图集合有变化”；
+- 连续点击不同 desc 打开预览时，标签和面板内标题都会更新。
+
+实测全部 234 个 find pattern × 200 张 1280×720 截图约 **27 秒**（带 yield，后台执行）。
+
+## 未改动
+
+- `findColorScanLimit` 仍默认 200；
+- 找色前台仍只匹配当前文件/当前可见区域；
+- 200 张限制是否继续扩大，等观察 CPU/缓存命中后再决定。
 
 ## 验证
 
-- 22 个核心单元测试通过；
-- 5 个演示集成测试通过；
-- 5 个真实截图测试通过；
-- 集成测试额外断言所有预览图标位置都不落在跳转链接范围内。
+- 23 个核心单元测试通过；
+- 6 个真实截图测试通过，包含 findMultiColor 字符串图标。
 
 ## 安装
 
-1. 打开 [Releases 页面](https://github.com/zzliux/assttyys-vscode-ext/releases/tag/0.3.1)。
-2. 下载 `assttyys-vscode-ext-0.3.1.vsix`。
-3. VS Code 扩展面板 → `...` → “从 VSIX 安装...”。
-4. 重新加载窗口。
-
-或命令行：
-
 ```powershell
-code --install-extension .\assttyys-vscode-ext-0.3.1.vsix --force
+code --install-extension .\assttyys-vscode-ext-0.4.0.vsix --force
 ```
+
+或从 Release 页面下载 `assttyys-vscode-ext-0.4.0.vsix` 后安装。

@@ -70,6 +70,10 @@ export class MatcherService {
     this.onError = handler;
   }
 
+  async hasDiskCache(fingerprint: string, options: MatcherOptions): Promise<boolean> {
+    return (await this.diskCache?.isCurrent(fingerprint, optionsKey(options))) ?? false;
+  }
+
   async matchPattern(
     pattern: PatternDefinition,
     options: MatcherOptions,
@@ -88,6 +92,7 @@ export class MatcherService {
     options: MatcherOptions,
     token?: MatchCancellation,
     onProgress?: (done: number, total: number) => void,
+    yieldToUi = false,
   ): Promise<Map<string, ScreenshotMatch[]>> {
     const result = new Map<string, ScreenshotMatch[]>();
     const signature = optionsKey(options);
@@ -164,6 +169,7 @@ export class MatcherService {
             continue;
           }
 
+          let handled = 0;
           for (const [id, pattern] of active) {
             if (partial.get(id)!.length >= options.maxMatchesPerPattern) {
               active.delete(id);
@@ -189,10 +195,19 @@ export class MatcherService {
             if (partial.get(id)!.length >= options.maxMatchesPerPattern) {
               active.delete(id);
             }
+            handled++;
+            // 后台全量找色时把一张图的 pattern 循环切成小段，避免长时间
+            // 占用扩展宿主线程；前台匹配保持连续执行。
+            if (yieldToUi && handled % 32 === 0) {
+              await new Promise<void>((resolve) => setImmediate(resolve));
+            }
           }
 
           processed++;
           onProgress?.(processed, total);
+          if (yieldToUi) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+          }
         }
       };
 

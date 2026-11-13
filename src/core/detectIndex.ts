@@ -9,21 +9,27 @@ import type { PatternDefinition } from './model';
  */
 export class DetectPatternIndex {
   private readonly byDirectory = new Map<string, Map<string, PatternDefinition>>();
+  private readonly allByDirectory = new Map<string, PatternDefinition[]>();
 
   constructor(private readonly kind: 'detect' | 'find' = 'detect') {}
 
   update(filePath: string, patterns: PatternDefinition[]): void {
     const dir = path.dirname(path.resolve(filePath));
     const map = new Map<string, PatternDefinition>();
+    const all: PatternDefinition[] = [];
     for (const pattern of patterns) {
       if (pattern.kind !== this.kind || !pattern.key) continue;
+      all.push(pattern);
       if (!map.has(pattern.key)) map.set(pattern.key, pattern);
     }
     this.byDirectory.set(dir, map);
+    this.allByDirectory.set(dir, all);
   }
 
   remove(filePath: string): void {
-    this.byDirectory.delete(path.dirname(path.resolve(filePath)));
+    const dir = path.dirname(path.resolve(filePath));
+    this.byDirectory.delete(dir);
+    this.allByDirectory.delete(dir);
   }
 
   resolve(fromFile: string, key: string): PatternDefinition | undefined {
@@ -56,7 +62,17 @@ export class DetectPatternIndex {
     return count;
   }
 
+  /** 返回全部 pattern，包括同一个 key 下不同的 desc 分组。 */
+  getAll(): PatternDefinition[] {
+    const patterns: PatternDefinition[] = [];
+    for (const list of this.allByDirectory.values()) {
+      patterns.push(...list);
+    }
+    return patterns;
+  }
+
   clear(): void {
     this.byDirectory.clear();
+    this.allByDirectory.clear();
   }
 }

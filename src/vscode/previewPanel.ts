@@ -85,8 +85,15 @@ export class PreviewPanel implements vscode.Disposable {
       return;
     }
     if (PreviewPanel.current) {
-      PreviewPanel.current.setMatchSet(matchSet, index);
+      // 不同 desc 的预览标签必须换掉。部分 VS Code 版本复用 WebviewPanel 时
+      // 标题栏不会立即重绘，直接重建面板可以保证标题和内容一致。
+      if (PreviewPanel.current.matchSet.label !== matchSet.label) {
+        PreviewPanel.current.dispose();
+        PreviewPanel.current = new PreviewPanel(matchSet, index);
+        return;
+      }
       PreviewPanel.current.panel.reveal(vscode.ViewColumn.Beside, true);
+      PreviewPanel.current.setMatchSet(matchSet, index);
       return;
     }
     PreviewPanel.current = new PreviewPanel(matchSet, index);
@@ -302,6 +309,8 @@ export class PreviewPanel implements vscode.Disposable {
 
   function render(data) {
     state = data;
+    const titleEl = document.querySelector('.title');
+    if (titleEl) titleEl.textContent = data.label;
     image.src = data.imageSrc;
     counter.textContent = (data.index + 1) + ' / ' + data.total;
     meta.textContent = data.fileName + ' · ' + data.width + '×' + data.height + ' · 匹配点 ' + (data.points || []).length + ' 个';

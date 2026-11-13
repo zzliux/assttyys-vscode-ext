@@ -110,6 +110,19 @@ suite('Assttyys 真实截图匹配', () => {
     }
   });
 
+  test('功能文件 findMultiColor 字符串也显示匹配图标', async function () {
+    this.timeout(120000);
+    const file = path.join(root, 'src', 'common', 'funcList', '312_通用活动.ts');
+    const document = await vscode.workspace.openTextDocument(file);
+    const range = new vscode.Range(0, 0, document.lineCount - 1, 0);
+    const token = new vscode.CancellationTokenSource().token;
+    const hints = await api.controller.provideHints(document, range, token);
+    const findHint = hints.find((hint) =>
+      String(hint.tooltip?.value ?? '').includes('find:体力图标'),
+    );
+    assert.ok(findHint, 'findMultiColor 的字符串没有生成图标');
+  });
+
   test('找色文件可见区域可以命中真实截图', async function () {
     this.timeout(120000);
     const file = path.join(root, 'src', 'common', 'multiFindColors.ts');

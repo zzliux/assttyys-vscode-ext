@@ -93,10 +93,24 @@ export interface DynamicDescReference {
   label: string;
 }
 
+/** 功能文件里 `findMultiColor('key')` 的第一个字符串参数。 */
+export interface FindCallReference {
+  id: string;
+  uri: string;
+  version: number;
+  key: string;
+  label: string;
+  /** 整个 findMultiColor 调用表达式结束位置（右括号后）。 */
+  anchorOffset: number;
+  /** 字符串左引号前的字符偏移，用于跳转。 */
+  startOffset: number;
+}
+
 export interface ExtractionResult {
   patterns: PatternDefinition[];
   references: StringReference[];
   dynamicReferences: DynamicDescReference[];
+  findReferences: FindCallReference[];
 }
 
 /** 一张截图上的匹配结果。 */

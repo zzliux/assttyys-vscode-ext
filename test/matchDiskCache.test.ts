@@ -27,6 +27,11 @@ describe('MatchDiskCache', () => {
     cache.set('pattern-a', matches);
     await cache.flush();
 
+    const current = new MatchDiskCache(cachePath);
+    expect(await current.isCurrent('fingerprint-a', 'options-a')).toBe(true);
+    expect(await current.isCurrent('fingerprint-b', 'options-a')).toBe(false);
+    expect(await current.isCurrent('fingerprint-a', 'options-b')).toBe(false);
+
     const reopened = new MatchDiskCache(cachePath);
     await reopened.ensure('fingerprint-a', 'options-a');
     expect(reopened.get('pattern-a')).toEqual(matches);

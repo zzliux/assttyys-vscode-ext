@@ -4,6 +4,7 @@ import type {
   ColorPoint,
   DynamicDescReference,
   ExtractionResult,
+  FindCallReference,
   FindRegion,
   PatternDefinition,
   Resolution,
@@ -343,6 +344,7 @@ export function extractPatterns(
   const patterns: PatternDefinition[] = [];
   const references: StringReference[] = [];
   const dynamicReferences: DynamicDescReference[] = [];
+  const findReferences: FindCallReference[] = [];
   let patternCounter = 0;
 
   const addPattern = (
@@ -483,11 +485,40 @@ export function extractPatterns(
     if (ts.isPropertyAssignment(node) && propertyName(node.name) === 'desc') {
       handleDescProperty(node);
     }
+    if (kind === 'inline' && ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const callName = ts.isPropertyAccessExpression(callee)
+        ? callee.name.text
+        : ts.isIdentifier(callee)
+          ? callee.text
+          : '';
+      if (
+        (callName === 'findMultiColor' ||
+          callName === 'findMultiColorEx' ||
+          callName === 'findMultiColorLoop') &&
+        node.arguments.length > 0 &&
+        isStringLiteralLike(node.arguments[0])
+      ) {
+        const arg = node.arguments[0];
+        if (arg.text) {
+          findReferences.push({
+            id: `${filePath}#find#${arg.getEnd()}`,
+            uri: filePath,
+            version,
+            key: arg.text,
+            label: `find:${arg.text}`,
+            // 图标放在调用右括号后，靠近字符串但和跳转文本隔开。
+            anchorOffset: node.getEnd(),
+            startOffset: arg.getStart(),
+          });
+        }
+      }
+    }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
 
-  return { patterns, references, dynamicReferences };
+  return { patterns, references, dynamicReferences, findReferences };
 }
 
 /** 判断文件是否是本插件关心的定义文件。 */

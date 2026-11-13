@@ -56,6 +56,26 @@ export class MatchDiskCache {
     this.data = { version: 1, fingerprint, optionsKey, entries: {} };
   }
 
+  /**
+   * 磁盘缓存的截图指纹/参数是否与当前一致。
+   *
+   * 首次启动时内存里没有上一次扫描的指纹，ScreenshotIndex 会把第一次扫描
+   * 当成“变化”；用这个检查可以避免无谓地清掉仍然有效的磁盘缓存。
+   */
+  async isCurrent(fingerprint: string, optionsKey: string): Promise<boolean> {
+    try {
+      const raw = await fs.readFile(this.filePath, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<CacheFile>;
+      return (
+        parsed.version === 1 &&
+        parsed.fingerprint === fingerprint &&
+        parsed.optionsKey === optionsKey
+      );
+    } catch {
+      return false;
+    }
+  }
+
   get(patternKey: string): ScreenshotMatch[] | undefined {
     return this.data?.entries[patternKey];
   }
