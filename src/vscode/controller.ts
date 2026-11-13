@@ -81,9 +81,13 @@ export class ExtensionController implements vscode.Disposable {
   private readonly invalidateTimer: Debounced<[string]>;
   private readonly detectReloadTimer: Debounced<[vscode.TextDocument]>;
   private readonly screenshotRefreshTimer: Debounced<[]>;
+  private readonly projectPrecomputeTimer: Debounced<[]>;
   private detectRevision = 0;
   private initializing = true;
   private matchingRequests = 0;
+  private projectPrecomputePromise: Promise<void> | null = null;
+  private projectPrecomputeAgain = false;
+  private projectPatternCount = 0;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.config = readConfig();
@@ -108,6 +112,9 @@ export class ExtensionController implements vscode.Disposable {
     this.screenshotRefreshTimer = debounce(() => {
       void this.refreshScreenshotsAndMatches('截图文件变化');
     }, 700);
+    this.projectPrecomputeTimer = debounce(() => {
+      void this.ensureProjectPrecomputed();
+    }, 500);
   }
 
   async initialize(): Promise<void> {
@@ -124,6 +131,8 @@ export class ExtensionController implements vscode.Disposable {
     this.setupScreenshotWatchers();
     this.initializing = false;
     this.updateStatus();
+    // 后台预匹配项目内所有比色 desc；第一次打开文件时如果还没完成会等它。
+    void this.ensureProjectPrecomputed();
   }
 
   private registerEvents(): void {
@@ -147,6 +156,7 @@ export class ExtensionController implements vscode.Disposable {
           void this.reloadDetectDocument(document);
         }
         this.invalidateDocument(document.uri.toString(), document.version);
+        this.scheduleProjectPrecompute();
       }),
       vscode.workspace.onDidOpenTextDocument((document) => {
         if (!isDetectFile(document.fileName)) return;
@@ -170,6 +180,7 @@ export class ExtensionController implements vscode.Disposable {
     await this.loadWorkspaceDetectFiles();
     await this.refreshScreenshotsAndMatches('工作区变化');
     this.setupScreenshotWatchers();
+    this.scheduleProjectPrecompute();
   }
 
   private async loadWorkspaceDetectFiles(): Promise<void> {
@@ -221,6 +232,101 @@ export class ExtensionController implements vscode.Disposable {
     this.refreshMarkerProviders();
   }
 
+  private scheduleProjectPrecompute(): void {
+    if (this.screenshots.entries.length === 0) return;
+    if (this.projectPrecomputePromise) {
+      this.projectPrecomputeAgain = true;
+      return;
+    }
+    this.projectPrecomputeTimer();
+  }
+
+  /**
+   * 项目级比色预匹配。
+   *
+   * 把 workspace 内 multiDetectColors.ts + funcList 里所有内联 desc 一起做一次
+   * 图优先匹配。结果进入 MatcherService 的 desc 签名缓存和磁盘缓存，之后打开
+   * 任何功能文件都直接命中，不再为每个文件重新解码截图。
+   */
+  private ensureProjectPrecomputed(): Promise<void> {
+    if (this.projectPrecomputePromise) return this.projectPrecomputePromise;
+    if (this.screenshots.entries.length === 0) return Promise.resolve();
+
+    const promise = this.runProjectPrecompute().finally(() => {
+      if (this.projectPrecomputePromise === promise) this.projectPrecomputePromise = null;
+      if (this.projectPrecomputeAgain) {
+        this.projectPrecomputeAgain = false;
+        void this.ensureProjectPrecomputed();
+      }
+    });
+    this.projectPrecomputePromise = promise;
+    return promise;
+  }
+
+  private async runProjectPrecompute(): Promise<void> {
+    if (this.screenshots.entries.length === 0) return;
+    const started = Date.now();
+    const generation = this.screenshots.generation;
+    try {
+      const patterns = await this.collectProjectDetectPatterns();
+      this.projectPatternCount = patterns.length;
+      if (patterns.length === 0) return;
+
+      this.beginMatching();
+      try {
+        await this.matcher.matchPatternsBatch(patterns, this.matcherOptions());
+      } finally {
+        this.endMatching();
+      }
+      this.log(
+        `[项目预匹配] ${patterns.length} 个比色 desc，耗时 ${Date.now() - started}ms`,
+      );
+      if (generation !== this.screenshots.generation) {
+        this.scheduleProjectPrecompute();
+      }
+    } catch (error) {
+      this.log(`项目预匹配失败：${String(error)}`);
+    }
+  }
+
+  private async collectProjectDetectPatterns(): Promise<PatternDefinition[]> {
+    const exclude = '**/{node_modules,.git,.refs}/**';
+    const [detectFiles, funcFiles] = await Promise.all([
+      vscode.workspace.findFiles('**/src/common/multiDetectColors.ts', exclude, 100),
+      vscode.workspace.findFiles('**/src/common/funcList/**/*.ts', exclude, 5000),
+    ]);
+
+    const openDocuments = new Map<string, vscode.TextDocument>();
+    for (const document of vscode.workspace.textDocuments) {
+      if (document.uri.scheme === 'file' && isRelevantFile(document.fileName)) {
+        openDocuments.set(document.fileName, document);
+      }
+    }
+
+    const paths = new Set<string>();
+    for (const uri of [...detectFiles, ...funcFiles]) {
+      const normalized = uri.fsPath.replace(/\\/g, '/');
+      if (/\/(node_modules|\.git|\.refs)\//.test(normalized)) continue;
+      paths.add(uri.fsPath);
+    }
+    for (const filePath of openDocuments.keys()) paths.add(filePath);
+
+    const patterns: PatternDefinition[] = [];
+    for (const filePath of paths) {
+      try {
+        const document = openDocuments.get(filePath);
+        const text = document ? document.getText() : await fs.readFile(filePath, 'utf8');
+        const result = extractPatterns(filePath, document?.version ?? 1, text);
+        for (const pattern of result.patterns) {
+          if (pattern.kind !== 'find') patterns.push(pattern);
+        }
+      } catch (error) {
+        this.log(`项目预匹配读取失败：${filePath}（${String(error)}）`);
+      }
+    }
+    return patterns;
+  }
+
   async provideHints(
     document: vscode.TextDocument,
     range: vscode.Range,
@@ -265,6 +371,8 @@ export class ExtensionController implements vscode.Disposable {
     // 所有比色 desc 都匹配掉，后续滚动/切换可见区域就不再重复解码。
     // 找色需要逐像素搜索，仍然只匹配当前可见区域。
     const hasFindPattern = state.patterns.some((pattern) => pattern.kind === 'find');
+    if (!hasFindPattern) await this.ensureProjectPrecomputed();
+    if (token.isCancellationRequested) return undefined;
     const matchTargets = hasFindPattern ? targets : state.targets;
 
     const pendingPatterns = Array.from(
@@ -551,6 +659,7 @@ export class ExtensionController implements vscode.Disposable {
         this.matcher.invalidate();
         this.invalidateAll();
         this.refreshMarkerProviders();
+        this.scheduleProjectPrecompute();
       }
       this.updateStatus();
       this.log(
@@ -580,6 +689,7 @@ export class ExtensionController implements vscode.Disposable {
     this.invalidateAll();
     this.setupScreenshotWatchers();
     await this.refreshScreenshotsAndMatches('配置变化');
+    this.scheduleProjectPrecompute();
   }
 
   async showStats(): Promise<void> {
@@ -589,6 +699,7 @@ export class ExtensionController implements vscode.Disposable {
     lines.push(`索引截图：${this.screenshots.entries.length} 张`);
     if (this.screenshots.resolutionSummary) lines.push(`分辨率分布：${this.screenshots.resolutionSummary}`);
     lines.push(`比色定义索引：${this.detectIndex.size} 条`);
+    lines.push(`项目比色预匹配 desc：${this.projectPatternCount} 条`);
     if (this.screenshots.scannedAt) lines.push(`最后扫描：${this.screenshots.scannedAt.toLocaleString()}`);
     if (this.screenshots.errors.length > 0) {
       lines.push(`扫描错误：${this.screenshots.errors.length} 条`);
@@ -757,6 +868,7 @@ export class ExtensionController implements vscode.Disposable {
       tooltip.appendMarkdown(`分辨率：${this.screenshots.resolutionSummary}\n\n`);
     }
     tooltip.appendMarkdown(`比色定义：${this.detectIndex.size} 条\n\n`);
+    tooltip.appendMarkdown(`项目比色预匹配：${this.projectPatternCount} 条\n\n`);
     tooltip.appendMarkdown(`找色扫描：最近 ${this.config.findColorScanLimit} 张\n\n`);
     if (this.screenshots.scannedAt) {
       tooltip.appendMarkdown(`最后扫描：${this.screenshots.scannedAt.toLocaleString()}\n\n`);
@@ -777,6 +889,7 @@ export class ExtensionController implements vscode.Disposable {
     this.invalidateTimer.cancel();
     this.detectReloadTimer.cancel();
     this.screenshotRefreshTimer.cancel();
+    this.projectPrecomputeTimer.cancel();
     void this.matcher.flushCache();
     for (const watcher of this.screenshotWatchers) watcher.dispose();
     for (const disposable of this.disposables) disposable.dispose();

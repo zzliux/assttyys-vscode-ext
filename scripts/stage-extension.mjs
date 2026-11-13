@@ -32,6 +32,7 @@ async function main() {
   await copyFile('README.md');
   await copyFile('LICENSE');
   await copyFile('CHANGELOG.md');
+  await copyFile('RELEASE_NOTES.md');
   await copyFile('THIRD-PARTY-NOTICES.md');
   await copyFile('package.json');
 

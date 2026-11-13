@@ -91,6 +91,7 @@ export class MatcherService {
   ): Promise<Map<string, ScreenshotMatch[]>> {
     const result = new Map<string, ScreenshotMatch[]>();
     const signature = optionsKey(options);
+    const generation = this.screenshots.generation;
     const pendingById = new Map<string, PatternDefinition>();
     if (token?.isCancellationRequested) return result;
     await this.diskCache?.ensure(this.screenshots.currentFingerprint, signature);
@@ -197,6 +198,9 @@ export class MatcherService {
 
       const concurrency = Math.min(8, candidates.length);
       await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+      // 匹配期间截图集合变了，这批结果不能写入新 generation 的缓存。
+      if (generation !== this.screenshots.generation) return result;
 
       for (const pattern of group) {
         const matches = partial.get(pattern.id) ?? [];
