@@ -2,6 +2,7 @@ import * as ts from 'typescript';
 import path from 'node:path';
 import type {
   ColorPoint,
+  DynamicDescReference,
   ExtractionResult,
   FindRegion,
   PatternDefinition,
@@ -287,6 +288,20 @@ function isFunctionOperatorItem(entryObject: ts.ObjectLiteralExpression): boolea
   return keys.has('oper') || keys.has('operStepRandom') || keys.has('retest');
 }
 
+/** 解析 `thisOperator[N].desc`，返回 N。 */
+function thisOperatorDescIndex(node: ts.Node): number | undefined {
+  if (!ts.isPropertyAccessExpression(node) || node.name.text !== 'desc') return undefined;
+  const elementAccess = node.expression;
+  if (!ts.isElementAccessExpression(elementAccess)) return undefined;
+  if (!ts.isIdentifier(elementAccess.expression) || elementAccess.expression.text !== 'thisOperator') {
+    return undefined;
+  }
+  const argument = elementAccess.argumentExpression;
+  if (!argument || !ts.isNumericLiteral(argument)) return undefined;
+  const index = Number(argument.text);
+  return Number.isInteger(index) ? index : undefined;
+}
+
 function findObjectProperty(
   object: ts.ObjectLiteralExpression,
   name: string,
@@ -327,6 +342,7 @@ export function extractPatterns(
 
   const patterns: PatternDefinition[] = [];
   const references: StringReference[] = [];
+  const dynamicReferences: DynamicDescReference[] = [];
   let patternCounter = 0;
 
   const addPattern = (
@@ -336,6 +352,8 @@ export function extractPatterns(
     region: FindRegion | undefined,
     similarity: number | undefined,
     anchorNode: ts.Node,
+    operatorIndex?: number,
+    keyOffset?: number,
   ): void => {
     patternCounter++;
     patterns.push({
@@ -350,6 +368,9 @@ export function extractPatterns(
       region,
       similarity,
       anchorOffset: anchorNode.getEnd(),
+      startOffset: anchorNode.getStart(),
+      keyOffset,
+      operatorIndex,
     });
   };
 
@@ -369,21 +390,40 @@ export function extractPatterns(
           key,
           label: `→ ${key}`,
           anchorOffset: valueNode.getEnd(),
+          startOffset: valueNode.getStart(),
+          operatorIndex: nearestOperatorIndex(entryObject),
         });
       }
       return;
     }
 
+    if (kind === 'inline') {
+      const targetOperatorIndex = thisOperatorDescIndex(valueNode);
+      if (targetOperatorIndex !== undefined) {
+        dynamicReferences.push({
+          id: `${filePath}#dyn#${valueNode.getEnd()}`,
+          uri: filePath,
+          version,
+          targetOperatorIndex,
+          anchorOffset: valueNode.getEnd(),
+          label: `thisOperator[${targetOperatorIndex}].desc`,
+        });
+        return;
+      }
+    }
+
     if (!ts.isArrayLiteralExpression(valueNode)) return;
 
     let entryKey: string | undefined;
+    let keyOffset: number | undefined;
     let region: FindRegion | undefined;
     let similarity: number | undefined;
 
     if (kind === 'detect' || kind === 'find') {
-      entryKey = propertyName(
-        ts.isPropertyAssignment(entryObject.parent) ? entryObject.parent.name : undefined,
-      );
+      if (ts.isPropertyAssignment(entryObject.parent)) {
+        entryKey = propertyName(entryObject.parent.name);
+        keyOffset = entryObject.parent.name.getStart();
+      }
       if (kind === 'find') {
         const regionProp = findObjectProperty(entryObject, 'region');
         if (regionProp) region = parseRegionValue(evaluator.eval(regionProp.initializer));
@@ -396,18 +436,28 @@ export function extractPatterns(
     const directParsed = parsePatternValue(directValue);
     if (directParsed) {
       let label: string;
+      let operatorIndex: number | undefined;
       if (kind === 'detect') {
         label = entryKey ?? `${baseName} 定义`;
       } else if (kind === 'find') {
         label = entryKey ? `${entryKey}#1` : `${baseName} 定义#1`;
       } else {
         const className = enclosingClassName(entryObject) ?? path.basename(filePath, '.ts');
-        const index = nearestOperatorIndex(entryObject);
-        label = index === undefined
+        operatorIndex = nearestOperatorIndex(entryObject);
+        label = operatorIndex === undefined
           ? `${className} @L${sourceFile.getLineAndCharacterOfPosition(valueNode.getStart()).line + 1}`
-          : `${className}.operator[${index}]`;
+          : `${className}.operator[${operatorIndex}]`;
       }
-      addPattern(directParsed, label, entryKey, region, similarity, valueNode);
+      addPattern(
+        directParsed,
+        label,
+        entryKey,
+        region,
+        similarity,
+        valueNode,
+        operatorIndex,
+        keyOffset,
+      );
       return;
     }
 
@@ -424,7 +474,7 @@ export function extractPatterns(
         if (!parsed) return;
         const suffix = total > 1 ? `#${index + 1}` : '';
         const label = entryKey ? `${entryKey}${suffix}` : `${baseName} 定义${suffix}`;
-        addPattern(parsed, label, entryKey, region, similarity, element);
+        addPattern(parsed, label, entryKey, region, similarity, element, undefined, keyOffset);
       });
     }
   };
@@ -437,7 +487,7 @@ export function extractPatterns(
   };
   visit(sourceFile);
 
-  return { patterns, references };
+  return { patterns, references, dynamicReferences };
 }
 
 /** 判断文件是否是本插件关心的定义文件。 */
@@ -445,10 +495,15 @@ export function isRelevantFile(fileName: string): boolean {
   const normalized = fileName.replace(/\\/g, '/');
   const baseName = path.basename(normalized);
   if (baseName === 'multiDetectColors.ts' || baseName === 'multiFindColors.ts') return true;
-  return /\/src\/common\/funcList\/[^/]+\.ts$/.test(normalized);
+  return /\/src\/common\/funcList(?:\.bak)?\/[^/]+\.ts$/.test(normalized);
 }
 
 /** 判断文件是否是比色定义文件。 */
 export function isDetectFile(fileName: string): boolean {
   return path.basename(fileName.replace(/\\/g, '/')) === 'multiDetectColors.ts';
+}
+
+/** 判断文件是否是找色定义文件。 */
+export function isFindFile(fileName: string): boolean {
+  return path.basename(fileName.replace(/\\/g, '/')) === 'multiFindColors.ts';
 }

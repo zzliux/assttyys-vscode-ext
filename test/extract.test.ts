@@ -32,6 +32,10 @@ describe('extractPatterns', () => {
     expect(result.patterns.every((item) => item.resolution.width === 1280)).toBe(true);
     expect(result.patterns.every((item) => item.resolution.height === 720)).toBe(true);
     expect(result.patterns.every((item) => item.key && item.label === item.key)).toBe(true);
+    const text = fs.readFileSync(path.join(REFS, 'multiDetectColors.ts'), 'utf8');
+    const explore = result.patterns.find((item) => item.key === '探索地图界面');
+    expect(explore?.keyOffset).toBeDefined();
+    expect(text.slice(explore!.keyOffset!, explore!.keyOffset! + 20)).toContain('探索地图界面');
   });
 
   it('解析 multiFindColors.ts 的找色定义及 region/similar', () => {
@@ -56,6 +60,10 @@ describe('extractPatterns', () => {
     const styled = result.patterns.find((item) => item.key === '剧情问号');
     expect(styled?.similarity).toBe(93);
     expect(result.patterns.every((item) => item.region)).toBe(true);
+    const text = fs.readFileSync(path.join(REFS, 'multiFindColors.ts'), 'utf8');
+    const treasure = result.patterns.find((item) => item.key === '组队探索_宝箱');
+    expect(treasure?.keyOffset).toBeDefined();
+    expect(text.slice(treasure!.keyOffset!, treasure!.keyOffset! + 20)).toContain('组队探索_宝箱');
   });
 
   it('解析功能文件里的内联 desc 数组和字符串引用', () => {
@@ -77,6 +85,18 @@ describe('extractPatterns', () => {
     expect(result.patterns).toHaveLength(0);
     expect(result.references).toHaveLength(1);
     expect(result.references[0].key).toBe('突破界面_寮');
+  });
+
+  it('解析 dynamic desc 以及 operatorIndex 映射', () => {
+    const result = parse('funcList.bak/010_地图进入突破界面.ts');
+    expect(result.dynamicReferences).toHaveLength(1);
+    expect(result.dynamicReferences[0]).toMatchObject({
+      targetOperatorIndex: 0,
+      label: 'thisOperator[0].desc',
+    });
+    expect(result.patterns.some((pattern) => pattern.operatorIndex !== undefined)).toBe(true);
+    expect(result.references.some((reference) => reference.operatorIndex === 0)).toBe(true);
+    expect(result.patterns.every((pattern) => pattern.startOffset !== undefined)).toBe(true);
   });
 
   it('字符串引用可以按目录解析到比色定义', () => {

@@ -58,6 +58,12 @@ export interface PatternDefinition {
   similarity?: number;
   /** 数组右括号后的字符偏移。 */
   anchorOffset: number;
+  /** 数组左括号的字符偏移。 */
+  startOffset?: number;
+  /** 比色/找色定义 key 属性的字符偏移（用于跳转到 key 而不是 desc 数组）。 */
+  keyOffset?: number;
+  /** 功能文件内联定义对应的 operator 数组下标。 */
+  operatorIndex?: number;
 }
 
 /** 功能文件里 `desc: 'key'` 的字符串引用。 */
@@ -69,11 +75,28 @@ export interface StringReference {
   label: string;
   /** 字符串右引号后的字符偏移。 */
   anchorOffset: number;
+  /** 字符串左引号前的字符偏移，用于跳转。 */
+  startOffset: number;
+  /** 所属 operator 数组下标。 */
+  operatorIndex?: number;
+}
+
+/** 功能文件里 `desc: thisOperator[N].desc` 这种动态引用。 */
+export interface DynamicDescReference {
+  id: string;
+  uri: string;
+  version: number;
+  /** 被引用的 operator 数组下标。 */
+  targetOperatorIndex: number;
+  /** 表达式结束位置，用于放匹配图标。 */
+  anchorOffset: number;
+  label: string;
 }
 
 export interface ExtractionResult {
   patterns: PatternDefinition[];
   references: StringReference[];
+  dynamicReferences: DynamicDescReference[];
 }
 
 /** 一张截图上的匹配结果。 */

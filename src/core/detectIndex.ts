@@ -10,11 +10,13 @@ import type { PatternDefinition } from './model';
 export class DetectPatternIndex {
   private readonly byDirectory = new Map<string, Map<string, PatternDefinition>>();
 
+  constructor(private readonly kind: 'detect' | 'find' = 'detect') {}
+
   update(filePath: string, patterns: PatternDefinition[]): void {
     const dir = path.dirname(path.resolve(filePath));
     const map = new Map<string, PatternDefinition>();
     for (const pattern of patterns) {
-      if (pattern.kind !== 'detect' || !pattern.key) continue;
+      if (pattern.kind !== this.kind || !pattern.key) continue;
       if (!map.has(pattern.key)) map.set(pattern.key, pattern);
     }
     this.byDirectory.set(dir, map);

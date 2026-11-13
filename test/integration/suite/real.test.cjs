@@ -48,6 +48,59 @@ suite('Assttyys 真实截图匹配', () => {
     assert.ok(elapsed < 30000, `功能文件匹配耗时过长：${elapsed}ms`);
   });
 
+  test('功能文件提供 Ctrl+单击跳转链接', async () => {
+    const file = path.join(root, 'src', 'common', 'funcList', '004_接受邀请.ts');
+    const document = await vscode.workspace.openTextDocument(file);
+    const token = new vscode.CancellationTokenSource().token;
+    const links = await api.controller.provideDocumentLinks(document, token);
+    assert.ok(links.length >= 2);
+    assert.ok(links.some((link) => link.target.fragment.includes('L')));
+    assert.ok(links.some((link) => link.tooltip.includes('multiFindColors')));
+
+    const backupFile = path.join(
+      root,
+      'src',
+      'common',
+      'funcList.bak',
+      '010_地图进入突破界面.ts',
+    );
+    const backupDocument = await vscode.workspace.openTextDocument(backupFile);
+    const backupLinks = await api.controller.provideDocumentLinks(backupDocument, token);
+    assert.ok(backupLinks.some((link) => link.tooltip.includes('operator[0]')));
+    assert.ok(backupLinks.some((link) => link.tooltip.includes('multiDetectColors')));
+
+    // 验证 DocumentLink 的 #L行,列 fragment 能真正定位到目标位置。
+    const targetLink = links.find((link) => link.tooltip.includes('multiFindColors'));
+    assert.ok(targetLink);
+    const match = /L(\d+),(\d+)/.exec(targetLink.target.fragment);
+    assert.ok(match);
+    await vscode.commands.executeCommand('vscode.open', targetLink.target);
+    await delay(500);
+    const editor = vscode.window.activeTextEditor;
+    assert.ok(editor);
+    assert.strictEqual(editor.selection.active.line + 1, Number(match[1]));
+    assert.ok(editor.document.lineAt(editor.selection.active.line).text.includes('组队探索_宝箱'));
+  });
+
+  test('动态 desc: thisOperator[0].desc 也生成截图图标', async function () {
+    this.timeout(120000);
+    const file = path.join(
+      root,
+      'src',
+      'common',
+      'funcList.bak',
+      '010_地图进入突破界面.ts',
+    );
+    const document = await vscode.workspace.openTextDocument(file);
+    const range = new vscode.Range(0, 0, document.lineCount - 1, 0);
+    const token = new vscode.CancellationTokenSource().token;
+    const hints = await api.controller.provideHints(document, range, token);
+    const dynamicHint = hints.find((hint) =>
+      String(hint.tooltip?.value ?? '').includes('thisOperator[0].desc'),
+    );
+    assert.ok(dynamicHint, '动态 desc 没有生成图标');
+  });
+
   test('找色文件可见区域可以命中真实截图', async function () {
     this.timeout(120000);
     const file = path.join(root, 'src', 'common', 'multiFindColors.ts');

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- 新增 Ctrl+单击跳转：
+  - `thisOperator[N]`、`thisOperator[N].desc`、`.oper[...]` 跳到本文件对应的 `operator[N]`；
+  - operator 项里的 `desc: 'key'` 跳到 `multiDetectColors.ts` 定义；
+  - `findMultiColor('key')` 等调用跳到 `multiFindColors.ts` 定义。
+- `desc: thisOperator[N].desc` 动态引用也生成截图匹配图标，并复用目标 desc 的缓存。
+- 支持 `funcList.bak` 目录下的文件。
+
 ## 0.2.0
 
 - 项目级比色预匹配：启动/截图集变化时一次匹配 workspace 内所有比色 desc（`multiDetectColors.ts` + `funcList` 内联数组），打开任意功能文件直接查缓存，不再按文件重复解码截图。

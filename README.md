@@ -12,6 +12,11 @@
   - `src/common/multiFindColors.ts`：多点找色定义。
 - 按配置的截图目录/文件/glob 扫描截图，只使用与定义**分辨率完全相同**的图片。
 - 功能文件里的 `desc: '准备界面_未准备'` 字符串引用，会根据同项目的 `multiDetectColors.ts` 解析，并在字符串旁显示图标。
+- 支持 Ctrl+单击跳转：
+  - `thisOperator[N]` / `thisOperator[N].desc` / `.oper[...]` → 本文件对应的 `operator[N]` 字段；
+  - `desc: 'key'` → `multiDetectColors.ts` 对应定义；
+  - `findMultiColor('key')` 等 → `multiFindColors.ts` 对应定义。
+- `desc: thisOperator[N].desc` 这种动态引用也会显示截图匹配图标，并复用 `operator[N]` 对应 desc 的缓存。
 - 图标显示命中数量，例如 `📷 3`；点击后可在预览面板中左右切换。
 - 预览面板支持：
   - 上一张/下一张、下拉选择；
@@ -33,14 +38,14 @@
 2. 在最新 tag 的 Release 附件中下载 VSIX，文件名类似：
 
    ```text
-   assttyys-vscode-ext-0.2.0.vsix
+   assttyys-vscode-ext-0.3.0.vsix
    ```
 
 3. 在 VS Code 中打开扩展面板，点右上角 `...` → “从 VSIX 安装...”，选择刚下载的 `.vsix`。
    或者命令行（把路径换成实际下载位置）：
 
    ```powershell
-   code --install-extension .\assttyys-vscode-ext-0.2.0.vsix --force
+   code --install-extension .\assttyys-vscode-ext-0.3.0.vsix --force
    ```
 
 4. 重新加载 VS Code 窗口。

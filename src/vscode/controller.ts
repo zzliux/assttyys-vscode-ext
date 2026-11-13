@@ -8,11 +8,13 @@ import type {
   ScreenshotMatch,
   StringReference,
 } from '../core/model';
-import { extractPatterns, isDetectFile, isRelevantFile } from '../core/extract';
+import { extractPatterns, isDetectFile, isFindFile, isRelevantFile } from '../core/extract';
+import { extractNavigationLinks } from '../core/navigation';
 import { DetectPatternIndex } from '../core/detectIndex';
 import { ScreenshotIndex } from '../core/screenshotIndex';
 import { MatcherService, type MatchCancellation } from '../core/matcherService';
 import { MatchDiskCache } from '../core/matchDiskCache';
+import { PreviewDocumentLinkProvider } from './documentLinks';
 import { configKey, readConfig, type ExtensionConfig } from './config';
 import { PreviewPanel } from './previewPanel';
 import { InlayHintsProvider } from './inlayHints';
@@ -69,17 +71,21 @@ export class ExtensionController implements vscode.Disposable {
   private screenshots = new ScreenshotIndex();
   private matcher: MatcherService;
   private readonly diskCache: MatchDiskCache;
-  private readonly detectIndex = new DetectPatternIndex();
+  private readonly detectIndex = new DetectPatternIndex('detect');
+  private readonly findIndex = new DetectPatternIndex('find');
   private readonly states = new Map<string, DocumentState>();
   private readonly loadedDetectFiles = new Map<string, number>();
+  private readonly loadedFindFiles = new Map<string, number>();
   private readonly warnedMissingDetect = new Set<string>();
   private readonly output: vscode.OutputChannel;
   private readonly statusBar: vscode.StatusBarItem;
   private readonly provider: InlayHintsProvider;
+  private readonly documentLinkProvider: PreviewDocumentLinkProvider;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly screenshotWatchers: vscode.Disposable[] = [];
   private readonly invalidateTimer: Debounced<[string]>;
   private readonly detectReloadTimer: Debounced<[vscode.TextDocument]>;
+  private readonly findReloadTimer: Debounced<[vscode.TextDocument]>;
   private readonly screenshotRefreshTimer: Debounced<[]>;
   private readonly projectPrecomputeTimer: Debounced<[]>;
   private detectRevision = 0;
@@ -102,12 +108,18 @@ export class ExtensionController implements vscode.Disposable {
     this.provider = new InlayHintsProvider((document, range, token) =>
       this.provideHints(document, range, token),
     );
+    this.documentLinkProvider = new PreviewDocumentLinkProvider((document, token) =>
+      this.provideDocumentLinks(document, token),
+    );
 
     this.invalidateTimer = debounce((uri: string) => {
       this.invalidateDocument(uri);
     }, 350);
     this.detectReloadTimer = debounce((document: vscode.TextDocument) => {
       void this.reloadDetectDocument(document);
+    }, 350);
+    this.findReloadTimer = debounce((document: vscode.TextDocument) => {
+      void this.reloadFindDocument(document);
     }, 350);
     this.screenshotRefreshTimer = debounce(() => {
       void this.refreshScreenshotsAndMatches('截图文件变化');
@@ -120,6 +132,10 @@ export class ExtensionController implements vscode.Disposable {
   async initialize(): Promise<void> {
     this.disposables.push(
       vscode.languages.registerInlayHintsProvider({ language: 'typescript' }, this.provider),
+      vscode.languages.registerDocumentLinkProvider(
+        { language: 'typescript' },
+        this.documentLinkProvider,
+      ),
     );
 
     this.statusBar.show();
@@ -145,6 +161,10 @@ export class ExtensionController implements vscode.Disposable {
           this.detectReloadTimer(document);
           return;
         }
+        if (isFindFile(document.fileName)) {
+          this.findReloadTimer(document);
+          return;
+        }
         if (isRelevantFile(document.fileName)) {
           this.invalidateTimer(document.uri.toString());
         }
@@ -155,12 +175,19 @@ export class ExtensionController implements vscode.Disposable {
           this.detectReloadTimer.cancel();
           void this.reloadDetectDocument(document);
         }
+        if (isFindFile(document.fileName)) {
+          this.findReloadTimer.cancel();
+          void this.reloadFindDocument(document);
+        }
         this.invalidateDocument(document.uri.toString(), document.version);
         this.scheduleProjectPrecompute();
       }),
       vscode.workspace.onDidOpenTextDocument((document) => {
-        if (!isDetectFile(document.fileName)) return;
-        void this.reloadDetectDocument(document);
+        if (isDetectFile(document.fileName)) {
+          void this.reloadDetectDocument(document);
+        } else if (isFindFile(document.fileName)) {
+          void this.reloadFindDocument(document);
+        }
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (!event.affectsConfiguration('assttyys')) return;
@@ -174,7 +201,9 @@ export class ExtensionController implements vscode.Disposable {
 
   private async initializeWorkspace(): Promise<void> {
     this.detectIndex.clear();
+    this.findIndex.clear();
     this.loadedDetectFiles.clear();
+    this.loadedFindFiles.clear();
     this.detectRevision++;
     this.invalidateAll();
     await this.loadWorkspaceDetectFiles();
@@ -185,22 +214,21 @@ export class ExtensionController implements vscode.Disposable {
 
   private async loadWorkspaceDetectFiles(): Promise<void> {
     try {
-      const files = await vscode.workspace.findFiles(
-        '**/src/common/multiDetectColors.ts',
-        '**/node_modules/**',
-        50,
-      );
-      for (const uri of files) {
-        await this.loadDetectFile(uri);
-      }
+      const [detectFiles, findFiles] = await Promise.all([
+        vscode.workspace.findFiles('**/src/common/multiDetectColors.ts', '**/node_modules/**', 50),
+        vscode.workspace.findFiles('**/src/common/multiFindColors.ts', '**/node_modules/**', 50),
+      ]);
+      for (const uri of detectFiles) await this.loadDetectFile(uri);
+      for (const uri of findFiles) await this.loadFindFile(uri);
+
       // 已经打开、但不在工作区内的定义文件。
       for (const document of vscode.workspace.textDocuments) {
-        if (isDetectFile(document.fileName) && document.uri.scheme === 'file') {
-          await this.loadDetectDocument(document);
-        }
+        if (document.uri.scheme !== 'file') continue;
+        if (isDetectFile(document.fileName)) await this.loadDetectDocument(document);
+        if (isFindFile(document.fileName)) await this.loadFindDocument(document);
       }
     } catch (error) {
-      this.log(`加载比色定义失败：${String(error)}`);
+      this.log(`加载定义索引失败：${String(error)}`);
     }
   }
 
@@ -230,6 +258,32 @@ export class ExtensionController implements vscode.Disposable {
     if (this.initializing) return;
     await this.loadDetectDocument(document);
     this.refreshMarkerProviders();
+  }
+
+  private async loadFindDocument(document: vscode.TextDocument): Promise<void> {
+    if (document.uri.scheme !== 'file') return;
+    const filePath = document.fileName;
+    const previous = this.loadedFindFiles.get(filePath);
+    if (previous === document.version) return;
+    const result = extractPatterns(filePath, document.version, document.getText());
+    this.loadedFindFiles.set(filePath, document.version);
+    this.findIndex.update(filePath, result.patterns);
+    this.documentLinkProvider.refresh();
+    this.log(`加载找色定义：${filePath}（${result.patterns.length} 条）`);
+  }
+
+  private async loadFindFile(uri: vscode.Uri): Promise<void> {
+    try {
+      const document = await vscode.workspace.openTextDocument(uri);
+      await this.loadFindDocument(document);
+    } catch (error) {
+      this.log(`读取找色定义失败：${uri.fsPath}（${String(error)}）`);
+    }
+  }
+
+  private async reloadFindDocument(document: vscode.TextDocument): Promise<void> {
+    if (this.initializing) return;
+    await this.loadFindDocument(document);
   }
 
   private scheduleProjectPrecompute(): void {
@@ -439,6 +493,79 @@ export class ExtensionController implements vscode.Disposable {
     return hint;
   }
 
+  async provideDocumentLinks(
+    document: vscode.TextDocument,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.DocumentLink[]> {
+    if (document.uri.scheme !== 'file' || !isRelevantFile(document.fileName)) return [];
+
+    try {
+      const links: vscode.DocumentLink[] = [];
+      const targetDocuments = new Map<string, vscode.TextDocument>();
+
+      const targetPosition = async (
+        targetUri: vscode.Uri,
+        offset: number,
+      ): Promise<vscode.Position | undefined> => {
+        if (targetUri.toString() === document.uri.toString()) {
+          return document.positionAt(offset);
+        }
+        let targetDocument = targetDocuments.get(targetUri.toString());
+        if (!targetDocument) {
+          targetDocument = await vscode.workspace.openTextDocument(targetUri);
+          targetDocuments.set(targetUri.toString(), targetDocument);
+        }
+        return targetDocument.positionAt(offset);
+      };
+
+      for (const nav of extractNavigationLinks(document.getText(), document.fileName)) {
+        if (token.isCancellationRequested) break;
+
+        let targetUri = document.uri;
+        let targetOffset: number | undefined;
+
+        if (nav.kind === 'same-operator') {
+          targetOffset = nav.targetOffset;
+        } else if (nav.kind === 'detect' && nav.key) {
+          let pattern = this.detectIndex.resolve(document.fileName, nav.key);
+          if (!pattern) {
+            await this.ensureDetectKey(document.fileName, nav.key);
+            pattern = this.detectIndex.resolve(document.fileName, nav.key);
+          }
+          if (!pattern) continue;
+          targetUri = vscode.Uri.file(pattern.uri);
+          targetOffset = pattern.keyOffset ?? pattern.startOffset ?? pattern.anchorOffset;
+        } else if (nav.kind === 'find' && nav.key) {
+          let pattern = this.findIndex.resolve(document.fileName, nav.key);
+          if (!pattern) {
+            await this.ensureFindFor(document.fileName, nav.key);
+            pattern = this.findIndex.resolve(document.fileName, nav.key);
+          }
+          if (!pattern) continue;
+          targetUri = vscode.Uri.file(pattern.uri);
+          targetOffset = pattern.keyOffset ?? pattern.startOffset ?? pattern.anchorOffset;
+        }
+
+        if (targetOffset === undefined) continue;
+        const position = await targetPosition(targetUri, targetOffset);
+        if (!position) continue;
+        const start = document.positionAt(nav.startOffset);
+        const end = document.positionAt(nav.endOffset);
+        if (start.isEqual(end)) continue;
+        const link = new vscode.DocumentLink(
+          new vscode.Range(start, end),
+          targetUri.with({ fragment: `L${position.line + 1},${position.character + 1}` }),
+        );
+        link.tooltip = nav.tooltip;
+        links.push(link);
+      }
+      return links;
+    } catch (error) {
+      this.log(`生成跳转链接失败：${document.fileName}（${String(error)}）`);
+      return [];
+    }
+  }
+
   private async ensureState(document: vscode.TextDocument): Promise<DocumentState | undefined> {
     if (!isRelevantFile(document.fileName)) return undefined;
     const uri = document.uri.toString();
@@ -461,8 +588,27 @@ export class ExtensionController implements vscode.Disposable {
       pattern,
     }));
 
-    if (this.config.showStringReferences && result.references.length > 0) {
+    // 字符串引用和动态 thisOperator[N].desc 都需要先解析同项目定义。
+    if (result.references.length > 0) {
       await this.ensureDetectFor(document.fileName, result.references);
+    }
+
+    const operatorTargets = new Map<number, PatternDefinition>();
+    for (const pattern of result.patterns) {
+      if (pattern.operatorIndex === undefined) continue;
+      if (!operatorTargets.has(pattern.operatorIndex)) {
+        operatorTargets.set(pattern.operatorIndex, pattern);
+      }
+    }
+    for (const reference of result.references) {
+      if (reference.operatorIndex === undefined) continue;
+      const pattern = this.detectIndex.resolve(document.fileName, reference.key);
+      if (pattern && !operatorTargets.has(reference.operatorIndex)) {
+        operatorTargets.set(reference.operatorIndex, pattern);
+      }
+    }
+
+    if (this.config.showStringReferences) {
       for (const reference of result.references) {
         const pattern = this.detectIndex.resolve(document.fileName, reference.key);
         if (!pattern) {
@@ -479,6 +625,18 @@ export class ExtensionController implements vscode.Disposable {
           pattern,
         });
       }
+    }
+
+    // `desc: thisOperator[N].desc` 直接用 operator[N] 的目标 desc 缓存匹配。
+    for (const dynamic of result.dynamicReferences) {
+      const pattern = operatorTargets.get(dynamic.targetOperatorIndex);
+      if (!pattern) continue;
+      targets.push({
+        anchorOffset: dynamic.anchorOffset,
+        label: dynamic.label,
+        stateKey: dynamic.id,
+        pattern,
+      });
     }
 
     const state: DocumentState = {
@@ -501,7 +659,7 @@ export class ExtensionController implements vscode.Disposable {
     const unresolved = references.some((reference) => !this.detectIndex.resolve(filePath, reference.key));
     if (!unresolved) return;
 
-    const detectFile = await this.findDetectFileNear(filePath);
+    const detectFile = await this.findDefinitionFileNear(filePath, 'multiDetectColors.ts');
     if (!detectFile) return;
     if (this.loadedDetectFiles.has(detectFile)) return;
     try {
@@ -512,10 +670,38 @@ export class ExtensionController implements vscode.Disposable {
     }
   }
 
-  private async findDetectFileNear(filePath: string): Promise<string | undefined> {
+  private async ensureDetectKey(filePath: string, key: string): Promise<void> {
+    if (this.detectIndex.resolve(filePath, key)) return;
+    const detectFile = await this.findDefinitionFileNear(filePath, 'multiDetectColors.ts');
+    if (!detectFile || this.loadedDetectFiles.has(detectFile)) return;
+    try {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(detectFile));
+      await this.loadDetectDocument(document);
+    } catch (error) {
+      this.log(`尝试加载同目录比色定义失败：${detectFile}（${String(error)}）`);
+    }
+  }
+
+  private async ensureFindFor(filePath: string, key: string): Promise<void> {
+    if (this.findIndex.resolve(filePath, key)) return;
+    const findFile = await this.findDefinitionFileNear(filePath, 'multiFindColors.ts');
+    if (!findFile) return;
+    if (this.loadedFindFiles.has(findFile)) return;
+    try {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(findFile));
+      await this.loadFindDocument(document);
+    } catch (error) {
+      this.log(`尝试加载同目录找色定义失败：${findFile}（${String(error)}）`);
+    }
+  }
+
+  private async findDefinitionFileNear(
+    filePath: string,
+    baseName: string,
+  ): Promise<string | undefined> {
     let directory = path.dirname(filePath);
     for (let depth = 0; depth < 8; depth++) {
-      const candidate = path.join(directory, 'multiDetectColors.ts');
+      const candidate = path.join(directory, baseName);
       try {
         const stat = await fs.stat(candidate);
         if (stat.isFile()) return candidate;
@@ -834,6 +1020,7 @@ export class ExtensionController implements vscode.Disposable {
 
   private refreshMarkerProviders(): void {
     this.provider.refresh();
+    this.documentLinkProvider.refresh();
   }
 
   private setStatusScanning(): void {
@@ -888,12 +1075,14 @@ export class ExtensionController implements vscode.Disposable {
   dispose(): void {
     this.invalidateTimer.cancel();
     this.detectReloadTimer.cancel();
+    this.findReloadTimer.cancel();
     this.screenshotRefreshTimer.cancel();
     this.projectPrecomputeTimer.cancel();
     void this.matcher.flushCache();
     for (const watcher of this.screenshotWatchers) watcher.dispose();
     for (const disposable of this.disposables) disposable.dispose();
     this.provider.dispose();
+    this.documentLinkProvider.dispose();
     PreviewPanel.disposeCurrent();
     this.statusBar.dispose();
     this.output.dispose();
